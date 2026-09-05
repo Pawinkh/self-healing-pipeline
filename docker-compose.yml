@@ -1,0 +1,115 @@
+name: self-healing-pipeline
+
+services:
+  # --- Broker -----------------------------------------------------------
+  kafka:
+    image: apache/kafka:latest
+    container_name: kafka
+    ports:
+      - "9092:9092" # internal / inter-container listener
+      - "29092:29092" # host-facing listener, for tools running outside docker
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: [ "CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # --- Observability ------------------------------------------------------
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # --- Producer -------------------------------------------------------
+  # Replays a CSV as if it were a live feed. Points at the bundled mock
+  # dataset by default -- swap CSV_PATH (and the mounted file) to point at
+  # the real dataset later, no code changes needed here.
+  producer:
+    build: ./producer
+    container_name: producer
+    volumes:
+      - ./data:/data:ro
+    environment:
+      CSV_PATH: /data/mock_cars.csv
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: cars.raw
+      BATCH_SIZE: "5"
+      BATCH_INTERVAL_SECONDS: "5"
+      LOOP_FOREVER: "true"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # --- Bronze -------------------------------------------------------
+  # Kafka -> Delta, untouched raw landing.
+  bronze-job:
+    build: ./spark-jobs
+    container_name: bronze-job
+    command: [ "python", "bronze_job.py" ]
+    volumes:
+      - ./delta:/data/delta
+      - ./checkpoints:/data/checkpoints
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: cars.raw
+      DELTA_TABLE_PATH: /data/delta/bronze
+      CHECKPOINT_PATH: /data/checkpoints/bronze
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # --- Silver -------------------------------------------------------
+  # Bronze -> parsed/typed/cleaned, via one SQL transform.
+  silver-job:
+    build: ./spark-jobs
+    container_name: silver-job
+    command: [ "python", "silver_job.py" ]
+    volumes:
+      - ./delta:/data/delta
+      - ./checkpoints:/data/checkpoints
+    environment:
+      BRONZE_PATH: /data/delta/bronze
+      SILVER_PATH: /data/delta/silver_cars
+      CHECKPOINT_PATH: /data/checkpoints/silver_cars
+    depends_on:
+      bronze-job:
+        condition: service_started
+
+  # --- Gold -------------------------------------------------------
+  # Silver -> business-ready fields. A plain SELECT for now; the future
+  # two-table join lands here (see gold_job.py).
+  gold-job:
+    build: ./spark-jobs
+    container_name: gold-job
+    command: [ "python", "gold_job.py" ]
+    volumes:
+      - ./delta:/data/delta
+      - ./checkpoints:/data/checkpoints
+    environment:
+      SILVER_PATH: /data/delta/silver_cars
+      GOLD_PATH: /data/delta/gold_car_overview
+      CHECKPOINT_PATH: /data/checkpoints/gold_car_overview
+    depends_on:
+      silver-job:
+        condition: service_started

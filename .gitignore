@@ -1,0 +1,110 @@
+# ==========================================
+# Self-Healing Pipeline - .gitignore
+# ==========================================
+
+# ------------------------------------------
+# Pipeline Data & Runtime Storage
+# ------------------------------------------
+# Exclude raw datasets except mock cars needed for demo
+data/*
+!data/mock_cars.csv
+!data/.gitkeep
+
+# Exclude generated Delta Lake tables and runtime parquet files
+delta/*
+!delta/.gitkeep
+
+# Exclude Spark structured streaming checkpoints
+checkpoints/*
+!checkpoints/.gitkeep
+
+# Spark / Hive / Derby metastore & local artifacts
+metastore_db/
+derby.log
+spark-warehouse/
+*.parquet
+*.crc
+
+# ------------------------------------------
+# Environment Variables & Secrets
+# ------------------------------------------
+.env
+.env.*
+*.env
+!.env.example
+!.env.template
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+credentials.json
+client_secret*.json
+
+# ------------------------------------------
+# Python & Virtual Environments
+# ------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing, Coverage & Type Checking
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging & Distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# ------------------------------------------
+# Docker & Logs
+# ------------------------------------------
+docker-compose.override.yml
+*.log
+
+# ------------------------------------------
+# IDEs & Code Editors
+# ------------------------------------------
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.sublime-project
+*.sublime-workspace
+
+# ------------------------------------------
+# Operating System Files
+# ------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/

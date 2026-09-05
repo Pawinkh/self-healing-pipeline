@@ -1,0 +1,16 @@
+Company Names,Cars Names,Engines,CC/Battery Capacity,HorsePower,Total Speed,Performance(0 - 100)KM/H,Cars Prices,Fuel Types,Seats,Torque
+Toyota,Corolla,1.8L I4,1800 cc,140 hp,180 km/h,9.2 sec,"$25,000",Petrol,5,177 Nm
+Honda,Civic,2.0L I4,1998 cc,158 hp,200 km/h,8.0 sec,"$27,500",Petrol,5,187 Nm
+Tesla,Model 3,Electric Motor,82 kWh,283 hp,225 km/h,5.8 sec,"$42,000",Electric,5,420 Nm
+BMW,M3,3.0L I6,2993 cc,473 hp,290 km/h,3.9 sec,"$75,000",Petrol,5,550 Nm
+Ford,Mustang GT,5.0L V8,4951 cc,450 hp,250 km/h,4.3 sec,"$45,000",Petrol,4,529 Nm
+Toyota,Prius,1.8L Hybrid,1798 cc,121 hp,180 km/h,10.5 sec,"$28,000",Hybrid,5,142 Nm
+Porsche,911 Turbo,3.7L Flat-6,3745 cc,572 hp,320 km/h,2.7 sec,"$180,000",Petrol,4,750 Nm
+Nissan,Leaf,Electric Motor,40 kWh,147 hp,157 km/h,7.9 sec,"$29,000",Electric,5,320 Nm
+Hyundai,Ioniq 5,Electric Motor,77 kWh,320 hp,185 km/h,5.2 sec,"$44,000",Electric,5,605 Nm
+Chevrolet,Corvette,6.2L V8,6162 cc,495 hp,312 km/h,2.9 sec,"$65,000",Petrol,2,637 Nm
+Toyota,RAV4,2.5L I4,2487 cc,203 hp,180 km/h,8.0 sec,"$30,000",Hybrid,5,243 Nm
+BMW,i4,Electric Motor,83.9 kWh,335 hp,190 km/h,5.7 sec,"$56,000",Electric,5,430 Nm
+Ford,F-150,3.5L V6,3496 cc,400 hp,160 km/h,5.3 sec,unknown,Petrol,6,610 Nm
+Kia,EV6,Electric Motor,77.4 kWh,320 hp,192 km/h,5.2 sec,"$48,000",Electric,5,605 Nm
+Mazda,MX-5,2.0L I4,1998 cc,181 hp,215 km/h,6.5 sec,"$29,000",Petrol,2,205 Nm
