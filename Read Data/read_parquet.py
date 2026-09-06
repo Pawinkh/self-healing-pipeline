@@ -1,5 +1,6 @@
 import sys
 import os
+# pyrefly: ignore [missing-import]
 import duckdb
 
 # Mapping of folder names for your pipeline layers
