@@ -6,9 +6,7 @@
 # Pipeline Data & Runtime Storage
 # ------------------------------------------
 # Exclude raw datasets except mock cars needed for demo
-data/*
-!data/mock_cars.csv
-!data/.gitkeep
+
 
 # Exclude generated Delta Lake tables and runtime parquet files
 delta/*
