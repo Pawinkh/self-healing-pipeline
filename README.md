@@ -9,10 +9,10 @@ small bundled mock dataset so it runs immediately with no download step.
 producer --> kafka --> bronze-job --> delta/bronze
                                           |
                                           v
-                                     silver-job --> delta/silver_cars
+                                     silver-job --> delta/silver
                                                         |
                                                         v
-                                                   gold-job --> delta/gold_car_overview
+                                                   gold-job --> delta/gold
 ```
 
 ## Prerequisites
