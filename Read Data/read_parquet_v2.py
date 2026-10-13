@@ -1004,7 +1004,8 @@ def main():
     for a in non_flags:
         lower_a = a.lower()
         if lower_a in TRACE_ALIASES:
-            mode = "trace"
+            if mode == "card":
+                mode = "trace"
             target_layer = "trace"
             user_specified_layer = True
         elif lower_a in LAYERS:
@@ -1027,7 +1028,7 @@ def main():
         last_layer = get_active_layer()
         if last_layer in LAYERS or last_layer in TRACE_ALIASES:
             target_layer = last_layer
-            if target_layer in TRACE_ALIASES:
+            if target_layer in TRACE_ALIASES and mode == "card":
                 mode = "trace"
 
     active_id = get_active_id()
