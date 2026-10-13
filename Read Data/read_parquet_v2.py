@@ -1,3 +1,66 @@
+"""
+Delta Lakehouse Parquet Inspector & Lineage Visualizer (v2)
+===========================================================
+
+FUNCTION:
+  Reads and inspects Delta Lake Parquet tables directly on the host using DuckDB
+  without needing a running Spark JVM. Supports rich terminal card views, tabular
+  tables, JSON dumps, schema analysis, cross-layer record lineage tracing (Bronze ->
+  Silver 1 -> Silver 2 -> Gold / Quarantine), and interactive HTML web views.
+
+BASIC USAGE:
+  python "Read Data/read_parquet_v2.py" [LAYER | trace] [OPTIONS]
+  (or from within 'Read Data/': python read_parquet_v2.py [LAYER] [OPTIONS])
+
+TARGET LAYERS:
+  bronze      - Inspect raw Kafka ingest payload (./delta/bronze)
+  silver1     - Inspect cleaned & typed layer (./delta/silver1)
+  silver2     - Inspect standardized records (./delta/silver2)
+  gold        - Inspect business-ready table (./delta/gold)
+  quarantine  - Inspect quarantined/failed records (./delta/silver2_quarantine)
+  audit       - Inspect fuzzy matching audit trail (./delta/silver2_fuzzy_audit)
+  ref         - Inspect canonical dictionary rules (./delta/ref_canonical_mappings)
+  trace       - Trace a single record_id across ALL layers simultaneously
+
+COMMON COMMANDS & EXAMPLES:
+  1. Quick Layer Preview (Card View of active synced record):
+       python "Read Data/read_parquet_v2.py" silver2
+       python "Read Data/read_parquet_v2.py" gold
+       python "Read Data/read_parquet_v2.py" quarantine
+
+  2. Cross-Layer Lineage / Journey Trace:
+       python "Read Data/read_parquet_v2.py" trace
+       (shows Bronze -> Silver 1 -> Silver 2 -> Gold transformations side-by-side)
+
+  3. Trace or Inspect a Specific Record ID:
+       python "Read Data/read_parquet_v2.py" trace --id <record_id>
+       python "Read Data/read_parquet_v2.py" silver2 <record_id>
+
+  4. Step / Navigate Records (maintains sync across layers):
+       python "Read Data/read_parquet_v2.py" --next      # Go to next record
+       python "Read Data/read_parquet_v2.py" --prev      # Go to previous record
+       python "Read Data/read_parquet_v2.py" --random    # Pick a random record
+       python "Read Data/read_parquet_v2.py" --reset     # Reset to default anchor
+
+  5. Tabular Multi-Row View:
+       python "Read Data/read_parquet_v2.py" silver2 --table 10
+       python "Read Data/read_parquet_v2.py" ref --table 20
+
+  6. Schema & Column Catalog:
+       python "Read Data/read_parquet_v2.py" silver2 --schema
+
+  7. Interactive Web Browser Viewer:
+       python "Read Data/read_parquet_v2.py" gold --html
+       python "Read Data/read_parquet_v2.py" trace --html
+
+  8. Column Filtering:
+       python "Read Data/read_parquet_v2.py" silver2 --col weather,lighting,crash_month
+
+  9. Raw vs. Unpacked Bronze:
+       python "Read Data/read_parquet_v2.py" bronze        # Unpacked JSON payload
+       python "Read Data/read_parquet_v2.py" bronze --raw  # Raw Kafka fields
+"""
+
 import sys
 import os
 import glob

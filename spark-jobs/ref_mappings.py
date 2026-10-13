@@ -6,7 +6,7 @@ for categorical standardization in Silver 2 and self-healing LLM loops.
 """
 
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -48,66 +48,96 @@ FUZZY_AUDIT_SCHEMA = StructType(
 # Canonical seed anchors for closed-vocabulary fuzzy matching.
 # Guardrail: Anchors are seed values only; promoted entries must NEVER become anchors
 # to avoid attracting other typos.
-CANONICAL_ANCHORS: Dict[str, List[str]] = {
-    "weather_condition": ["CLEAR", "RAIN", "CLOUDY", "SNOW", "FOG", "UNKNOWN"],
-    "lighting_condition": [
-        "DAYLIGHT",
-        "DARKNESS, LIGHTED ROAD",
-        "DARKNESS",
-        "UNKNOWN",
-    ],
-    "street_direction": ["NORTH", "SOUTH", "EAST", "WEST"],
-    "crash_month": [
-        "JANUARY",
-        "FEBRUARY",
-        "MARCH",
-        "APRIL",
-        "MAY",
-        "JUNE",
-        "JULY",
-        "AUGUST",
-        "SEPTEMBER",
-        "OCTOBER",
-        "NOVEMBER",
-        "DECEMBER",
-    ],
-    "crash_day_of_week": [
-        "SUNDAY",
-        "MONDAY",
-        "TUESDAY",
-        "WEDNESDAY",
-        "THURSDAY",
-        "FRIDAY",
-        "SATURDAY",
-    ],
-}
-
-# Anchor -> value stored in ref_canonical_mappings (shared by Silver 2 and promotion)
-ANCHOR_TO_CANONICAL: Dict[str, Dict[str, str]] = {
-    "street_direction": {"NORTH": "N", "SOUTH": "S", "EAST": "E", "WEST": "W"},
+# ==============================================================================
+# SINGLE SOURCE OF TRUTH: CANONICAL REFERENCE TAXONOMY
+# ==============================================================================
+# Maps field_name -> {
+#     CANONICAL_TARGET_VALUE: [list_of_synonyms_and_abbreviations]
+# }
+# Any edit here automatically updates CANONICAL_ANCHORS, ANCHOR_TO_CANONICAL,
+# and SEED_ENTRIES consistently across the entire pipeline.
+CANONICAL_TAXONOMY: Dict[str, Dict[str, List[str]]] = {
+    "weather_condition": {
+        "CLEAR": ["C", "CLEAR WEATHER"],
+        "RAIN": ["R", "RAINY"],
+        "SNOW": [],
+        "FOG": [],
+        "UNKNOWN": ["U", "NOT KNOWN"],
+        "CLOUDY": ["CLOUDY/OVERCAST", "O", "OVERCAST"],
+    },
+    "lighting_condition": {
+        "DAYLIGHT": ["D", "MORNING", "DAY"],
+        "DARKNESS, LIGHTED ROAD": ["N, L", "NIGHT, LIGHTED", "NIGHT WITH LIGHT"],
+        "DARKNESS": ["N", "NIGHT"],
+        "UNKNOWN": ["U", "NOT KNOWN"],
+    },
+    "street_direction": {
+        "NORTH": ["NOR", "N"],
+        "SOUTH": ["SOU", "S"],
+        "EAST": ["EAS", "E"],
+        "WEST": ["WES", "W"],
+    },
     "crash_month": {
-        "JANUARY": "1",
-        "FEBRUARY": "2",
-        "MARCH": "3",
-        "APRIL": "4",
-        "MAY": "5",
-        "JUNE": "6",
-        "JULY": "7",
-        "AUGUST": "8",
-        "SEPTEMBER": "9",
-        "OCTOBER": "10",
-        "NOVEMBER": "11",
-        "DECEMBER": "12",
+        "JANUARY": ["JAN", "1", "01"],
+        "FEBRUARY": ["FEB", "2", "02"],
+        "MARCH": ["MAR", "3", "03"],
+        "APRIL": ["APR", "4", "04"],
+        "MAY": ["MAY", "5", "05"],
+        "JUNE": ["JUN", "6", "06"],
+        "JULY": ["JUL", "7", "07"],
+        "AUGUST": ["AUG", "8", "08"],
+        "SEPTEMBER": ["SEP", "9", "09"],
+        "OCTOBER": ["OCT", "10"],
+        "NOVEMBER": ["NOV", "11"],
+        "DECEMBER": ["DEC", "12"],
     },
     "crash_day_of_week": {
-        "SUNDAY": "1",
-        "MONDAY": "2",
-        "TUESDAY": "3",
-        "WEDNESDAY": "4",
-        "THURSDAY": "5",
-        "FRIDAY": "6",
-        "SATURDAY": "7",
+        "SUNDAY": ["SUN", "SU", "1", "01"],
+        "MONDAY": ["MON", "MO", "2", "02"],
+        "TUESDAY": ["TUE", "TU", "3", "03"],
+        "WEDNESDAY": ["WED", "WE", "4", "04"],
+        "THURSDAY": ["THU", "TH", "5", "05"],
+        "FRIDAY": ["FRI", "FR", "6", "06"],
+        "SATURDAY": ["SAT", "SA", "7", "07"],
     },
+    "hit_and_run_i": {
+        "TRUE": ["Y", "YES", "RIGHT", "T", "1"],
+        "FALSE": ["N", "NO", "WRONG", "F", "0"],
+    },
+    "damage": {
+        "OVER $1,500": ["> $1500", "HIGH"],
+        "$501 - $1,500": ["$501 - $1500", "MEDIUM"],
+        "$500 OR LESS": ["<= $500", "≤ $500", "LOW"],
+    },
+    "num_units": {
+        "1.0": ["ONE"],
+        "2.0": ["TWO"],
+        "3.0": ["THREE"],
+        "4.0": ["FOUR"],
+        "5.0": ["FIVE"],
+        "6.0": ["SIX"],
+    },
+}
+
+# Closed-vocabulary fields eligible for Levenshtein fuzzy distance matching
+FUZZY_CANONICAL_FIELDS = [
+    "weather_condition",
+    "lighting_condition",
+    "street_direction",
+    "crash_month",
+    "crash_day_of_week",
+]
+
+# Canonical seed anchors for fuzzy matching (auto-derived from taxonomy)
+CANONICAL_ANCHORS: Dict[str, List[str]] = {
+    field: list(CANONICAL_TAXONOMY[field].keys())
+    for field in FUZZY_CANONICAL_FIELDS
+}
+
+# Anchor -> canonical stored value (shared by Silver 2 and promotion)
+ANCHOR_TO_CANONICAL: Dict[str, Dict[str, str]] = {
+    field: {anchor: anchor for anchor in CANONICAL_TAXONOMY[field].keys()}
+    for field in FUZZY_CANONICAL_FIELDS
 }
 
 
@@ -143,135 +173,17 @@ def fuzzy_canonical(col, anchors: List[str], max_frac: float = 0.25):
 # Initial seed vocabulary extracted from original Silver 2 SQL rules.
 # Deliberately NOT seeded: two-letter month abbreviations that are ambiguous
 # ("MA" = March/May, "JU" = June/July). Those go to quarantine instead of guessing.
-SEED_ENTRIES = [
-    # weather_condition
-    ("weather_condition", "CLEAR", "CLEAR"),
-    ("weather_condition", "C", "CLEAR"),
-    ("weather_condition", "CLEAR WEATHER", "CLEAR"),
-    ("weather_condition", "RAIN", "RAIN"),
-    ("weather_condition", "R", "RAIN"),
-    ("weather_condition", "RAINY", "RAIN"),
-    ("weather_condition", "SNOW", "SNOW"),
-    ("weather_condition", "FOG", "FOG"),
-    ("weather_condition", "UNKNOWN", "UNKNOWN"),
-    ("weather_condition", "U", "UNKNOWN"),
-    ("weather_condition", "NOT KNOWN", "UNKNOWN"),
-    ("weather_condition", "CLOUDY/OVERCAST", "CLOUDY"),
-    ("weather_condition", "CLOUDY", "CLOUDY"),
-    ("weather_condition", "O", "CLOUDY"),
-    ("weather_condition", "OVERCAST", "CLOUDY"),
-    # lighting_condition
-    ("lighting_condition", "DAYLIGHT", "DAYLIGHT"),
-    ("lighting_condition", "D", "DAYLIGHT"),
-    ("lighting_condition", "MORNING", "DAYLIGHT"),
-    ("lighting_condition", "DAY", "DAYLIGHT"),
-    ("lighting_condition", "DARKNESS, LIGHTED ROAD", "DARKNESS, LIGHTED ROAD"),
-    ("lighting_condition", "N, L", "DARKNESS, LIGHTED ROAD"),
-    ("lighting_condition", "NIGHT, LIGHTED", "DARKNESS, LIGHTED ROAD"),
-    ("lighting_condition", "NIGHT WITH LIGHT", "DARKNESS, LIGHTED ROAD"),
-    ("lighting_condition", "DARKNESS", "DARKNESS"),
-    ("lighting_condition", "N", "DARKNESS"),
-    ("lighting_condition", "NIGHT", "DARKNESS"),
-    ("lighting_condition", "UNKNOWN", "UNKNOWN"),
-    ("lighting_condition", "U", "UNKNOWN"),
-    ("lighting_condition", "NOT KNOWN", "UNKNOWN"),
-    # hit_and_run_i
-    ("hit_and_run_i", "Y", "Y"),
-    ("hit_and_run_i", "TRUE", "Y"),
-    ("hit_and_run_i", "YES", "Y"),
-    ("hit_and_run_i", "RIGHT", "Y"),
-    ("hit_and_run_i", "N", "N"),
-    ("hit_and_run_i", "FALSE", "N"),
-    ("hit_and_run_i", "NO", "N"),
-    ("hit_and_run_i", "WRONG", "N"),
-    # damage
-    ("damage", "OVER $1,500", "OVER $1,500"),
-    ("damage", "> $1500", "OVER $1,500"),
-    ("damage", "HIGH", "OVER $1,500"),
-    ("damage", "$501 - $1,500", "$501 - $1,500"),
-    ("damage", "$501 - $1500", "$501 - $1,500"),
-    ("damage", "MEDIUM", "$501 - $1,500"),
-    ("damage", "$500 OR LESS", "$500 OR LESS"),
-    ("damage", "<= $500", "$500 OR LESS"),
-    ("damage", "≤ $500", "$500 OR LESS"),
-    ("damage", "LOW", "$500 OR LESS"),
-    # street_direction
-    ("street_direction", "S", "S"),
-    ("street_direction", "SOUTH", "S"),
-    ("street_direction", "SOU", "S"),
-    ("street_direction", "N", "N"),
-    ("street_direction", "NORTH", "N"),
-    ("street_direction", "NOR", "N"),
-    ("street_direction", "E", "E"),
-    ("street_direction", "EAST", "E"),
-    ("street_direction", "EAS", "E"),
-    ("street_direction", "W", "W"),
-    ("street_direction", "WEST", "W"),
-    ("street_direction", "WES", "W"),
-    # num_units words
-    ("num_units", "ONE", "1.0"),
-    ("num_units", "TWO", "2.0"),
-    ("num_units", "THREE", "3.0"),
-    ("num_units", "FOUR", "4.0"),
-    ("num_units", "FIVE", "5.0"),
-    ("num_units", "SIX", "6.0"),
-    # crash_month names/abbreviations
-    ("crash_month", "JANUARY", "1"),
-    ("crash_month", "JAN", "1"),
-    ("crash_month", "JA", "1"),
-    ("crash_month", "FEBRUARY", "2"),
-    ("crash_month", "FEB", "2"),
-    ("crash_month", "FE", "2"),
-    ("crash_month", "MARCH", "3"),
-    ("crash_month", "MAR", "3"),
-    ("crash_month", "APRIL", "4"),
-    ("crash_month", "APR", "4"),
-    ("crash_month", "AP", "4"),
-    ("crash_month", "MAY", "5"),
-    ("crash_month", "MY", "5"),
-    ("crash_month", "JUNE", "6"),
-    ("crash_month", "JUN", "6"),
-    ("crash_month", "JULY", "7"),
-    ("crash_month", "JUL", "7"),
-    ("crash_month", "JL", "7"),
-    ("crash_month", "AUGUST", "8"),
-    ("crash_month", "AUG", "8"),
-    ("crash_month", "AU", "8"),
-    ("crash_month", "SEPTEMBER", "9"),
-    ("crash_month", "SEP", "9"),
-    ("crash_month", "SE", "9"),
-    ("crash_month", "OCTOBER", "10"),
-    ("crash_month", "OCT", "10"),
-    ("crash_month", "OC", "10"),
-    ("crash_month", "NOVEMBER", "11"),
-    ("crash_month", "NOV", "11"),
-    ("crash_month", "NO", "11"),
-    ("crash_month", "DECEMBER", "12"),
-    ("crash_month", "DEC", "12"),
-    ("crash_month", "DE", "12"),
-    # crash_day_of_week
-    ("crash_day_of_week", "SUNDAY", "1"),
-    ("crash_day_of_week", "SUN", "1"),
-    ("crash_day_of_week", "SU", "1"),
-    ("crash_day_of_week", "MONDAY", "2"),
-    ("crash_day_of_week", "MON", "2"),
-    ("crash_day_of_week", "MO", "2"),
-    ("crash_day_of_week", "TUESDAY", "3"),
-    ("crash_day_of_week", "TUE", "3"),
-    ("crash_day_of_week", "TU", "3"),
-    ("crash_day_of_week", "WEDNESDAY", "4"),
-    ("crash_day_of_week", "WED", "4"),
-    ("crash_day_of_week", "WE", "4"),
-    ("crash_day_of_week", "THURSDAY", "5"),
-    ("crash_day_of_week", "THU", "5"),
-    ("crash_day_of_week", "TH", "5"),
-    ("crash_day_of_week", "FRIDAY", "6"),
-    ("crash_day_of_week", "FRI", "6"),
-    ("crash_day_of_week", "FR", "6"),
-    ("crash_day_of_week", "SATURDAY", "7"),
-    ("crash_day_of_week", "SAT", "7"),
-    ("crash_day_of_week", "SA", "7"),
-]
+# Initial seed vocabulary extracted dynamically from CANONICAL_TAXONOMY.
+# Deliberately NOT seeded: two-letter month abbreviations that are ambiguous
+# ("MA" = March/May, "JU" = June/July). Those go to quarantine instead of guessing.
+SEED_ENTRIES: List[Tuple[str, str, str]] = []
+for _field, _groups in CANONICAL_TAXONOMY.items():
+    for _canonical, _synonyms in _groups.items():
+        # Canonical target maps to itself
+        SEED_ENTRIES.append((_field, _canonical, _canonical))
+        # Known abbreviations and synonyms map to canonical target
+        for _syn in _synonyms:
+            SEED_ENTRIES.append((_field, _syn, _canonical))
 
 
 def _is_delta_table(spark: SparkSession, path: str) -> bool:

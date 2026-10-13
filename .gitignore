@@ -109,3 +109,4 @@ $RECYCLE.BIN/
 
 # Ignore .active_id files anywhere in the repo
 **/.active_id
+/Read Data
