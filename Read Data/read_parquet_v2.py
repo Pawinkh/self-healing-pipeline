@@ -1,3 +1,66 @@
+"""
+Delta Lakehouse Parquet Inspector & Lineage Visualizer (v2)
+===========================================================
+
+FUNCTION:
+  Reads and inspects Delta Lake Parquet tables directly on the host using DuckDB
+  without needing a running Spark JVM. Supports rich terminal card views, tabular
+  tables, JSON dumps, schema analysis, cross-layer record lineage tracing (Bronze ->
+  Silver 1 -> Silver 2 -> Gold / Quarantine), and interactive HTML web views.
+
+BASIC USAGE:
+  python "Read Data/read_parquet_v2.py" [LAYER | trace] [OPTIONS]
+  (or from within 'Read Data/': python read_parquet_v2.py [LAYER] [OPTIONS])
+
+TARGET LAYERS:
+  bronze      - Inspect raw Kafka ingest payload (./delta/bronze)
+  silver1     - Inspect cleaned & typed layer (./delta/silver1)
+  silver2     - Inspect standardized records (./delta/silver2)
+  gold        - Inspect business-ready table (./delta/gold)
+  quarantine  - Inspect quarantined/failed records (./delta/silver2_quarantine)
+  audit       - Inspect fuzzy matching audit trail (./delta/silver2_fuzzy_audit)
+  ref         - Inspect canonical dictionary rules (./delta/ref_canonical_mappings)
+  trace       - Trace a single record_id across ALL layers simultaneously
+
+COMMON COMMANDS & EXAMPLES:
+  1. Quick Layer Preview (Card View of active synced record):
+       python "Read Data/read_parquet_v2.py" silver2
+       python "Read Data/read_parquet_v2.py" gold
+       python "Read Data/read_parquet_v2.py" quarantine
+
+  2. Cross-Layer Lineage / Journey Trace:
+       python "Read Data/read_parquet_v2.py" trace
+       (shows Bronze -> Silver 1 -> Silver 2 -> Gold transformations side-by-side)
+
+  3. Trace or Inspect a Specific Record ID:
+       python "Read Data/read_parquet_v2.py" trace --id <record_id>
+       python "Read Data/read_parquet_v2.py" silver2 <record_id>
+
+  4. Step / Navigate Records (maintains sync across layers):
+       python "Read Data/read_parquet_v2.py" --next      # Go to next record
+       python "Read Data/read_parquet_v2.py" --prev      # Go to previous record
+       python "Read Data/read_parquet_v2.py" --random    # Pick a random record
+       python "Read Data/read_parquet_v2.py" --reset     # Reset to default anchor
+
+  5. Tabular Multi-Row View:
+       python "Read Data/read_parquet_v2.py" silver2 --table 10
+       python "Read Data/read_parquet_v2.py" ref --table 20
+
+  6. Schema & Column Catalog:
+       python "Read Data/read_parquet_v2.py" silver2 --schema
+
+  7. Interactive Web Browser Viewer:
+       python "Read Data/read_parquet_v2.py" gold --html
+       python "Read Data/read_parquet_v2.py" trace --html
+
+  8. Column Filtering:
+       python "Read Data/read_parquet_v2.py" silver2 --col weather,lighting,crash_month
+
+  9. Raw vs. Unpacked Bronze:
+       python "Read Data/read_parquet_v2.py" bronze        # Unpacked JSON payload
+       python "Read Data/read_parquet_v2.py" bronze --raw  # Raw Kafka fields
+"""
+
 import sys
 import os
 import glob
@@ -36,6 +99,7 @@ except ImportError:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 ACTIVE_ID_FILE = os.path.join(SCRIPT_DIR, ".active_id")
+ACTIVE_LAYER_FILE = os.path.join(SCRIPT_DIR, ".active_layer")
 
 def resolve_layer_path(relative_path: str) -> str:
     """Resolves path whether script is executed from project root or Read Data/ folder."""
@@ -63,6 +127,27 @@ LAYERS = {
 }
 
 TRACE_ALIASES = {"trace", "pipeline", "all", "compare", "lineage", "journey"}
+
+def get_active_layer() -> str:
+    """Gets the most recently viewed pipeline layer, or defaults to silver1."""
+    if os.path.exists(ACTIVE_LAYER_FILE):
+        try:
+            with open(ACTIVE_LAYER_FILE, "r", encoding="utf-8") as f:
+                l = f.read().strip()
+                if l in LAYERS or l in TRACE_ALIASES:
+                    return l
+        except Exception:
+            pass
+    return "silver1"
+
+def set_active_layer(layer_name: str) -> None:
+    """Persists the active pipeline layer."""
+    try:
+        os.makedirs(os.path.dirname(ACTIVE_LAYER_FILE), exist_ok=True)
+        with open(ACTIVE_LAYER_FILE, "w", encoding="utf-8") as f:
+            f.write(layer_name.strip())
+    except Exception:
+        pass
 
 def get_active_id() -> str:
     """Gets the currently synced record ID from cache, or initializes with a default anchor."""
@@ -99,27 +184,32 @@ def set_active_id(rec_id: str) -> None:
     except Exception:
         pass
 
-def navigate_active_id(direction: str, current_id: str) -> str:
+def navigate_active_id(direction: str, current_id: str, layer: str = "silver1") -> str:
     """Navigates to next, previous, or random record in the dataset and updates active ID."""
-    s1_pat = LAYERS["silver1"]
+    nav_layer = layer if layer in LAYERS else "silver1"
+    if nav_layer == "ref":
+        nav_layer = "silver1"
+
+    pat = LAYERS.get(nav_layer, LAYERS["silver1"])
+    id_col = "kafka_key" if nav_layer == "bronze" else "record_id"
     new_id = None
     try:
         if direction == "next":
-            res = duckdb.sql(f"SELECT record_id FROM '{s1_pat}' WHERE record_id > '{current_id}' ORDER BY record_id ASC LIMIT 1").fetchone()
+            res = duckdb.sql(f"SELECT {id_col} FROM '{pat}' WHERE {id_col} > '{current_id}' ORDER BY {id_col} ASC LIMIT 1").fetchone()
             if not res or not res[0]:
-                res = duckdb.sql(f"SELECT record_id FROM '{s1_pat}' ORDER BY record_id ASC LIMIT 1").fetchone()
+                res = duckdb.sql(f"SELECT {id_col} FROM '{pat}' ORDER BY {id_col} ASC LIMIT 1").fetchone()
             if res:
-                new_id = res[0]
+                new_id = str(res[0])
         elif direction == "prev":
-            res = duckdb.sql(f"SELECT record_id FROM '{s1_pat}' WHERE record_id < '{current_id}' ORDER BY record_id DESC LIMIT 1").fetchone()
+            res = duckdb.sql(f"SELECT {id_col} FROM '{pat}' WHERE {id_col} < '{current_id}' ORDER BY {id_col} DESC LIMIT 1").fetchone()
             if not res or not res[0]:
-                res = duckdb.sql(f"SELECT record_id FROM '{s1_pat}' ORDER BY record_id DESC LIMIT 1").fetchone()
+                res = duckdb.sql(f"SELECT {id_col} FROM '{pat}' ORDER BY {id_col} DESC LIMIT 1").fetchone()
             if res:
-                new_id = res[0]
+                new_id = str(res[0])
         elif direction == "random":
-            res = duckdb.sql(f"SELECT record_id FROM '{s1_pat}' ORDER BY random() LIMIT 1").fetchone()
+            res = duckdb.sql(f"SELECT {id_col} FROM '{pat}' ORDER BY random() LIMIT 1").fetchone()
             if res:
-                new_id = res[0]
+                new_id = str(res[0])
     except Exception:
         pass
 
@@ -158,7 +248,7 @@ def unpack_bronze_record(b_df: pd.DataFrame) -> pd.DataFrame:
         rows.append(row.to_dict())
     return pd.DataFrame(rows)
 
-def format_val(val) -> str:
+def format_val(val, max_len: Optional[int] = None) -> str:
     """Format cell value with clean styles for NULLs, numbers, and booleans."""
     if val is None or (isinstance(val, float) and pd.isna(val)) or str(val) == "nan":
         return "[dim italic]null[/dim italic]" if RICH_AVAILABLE else "null"
@@ -172,6 +262,8 @@ def format_val(val) -> str:
         return f"[bright_cyan]{s}[/bright_cyan]" if RICH_AVAILABLE else s
     except ValueError:
         pass
+    if max_len and len(s) > max_len:
+        s = s[:max_len - 3] + "..."
     return s
 
 def print_banner(target_name: str, total_count: int, total_cols: int, preview_count: int, mode: str, active_id: Optional[str] = None):
@@ -242,23 +334,19 @@ def render_card_view(df: pd.DataFrame, force_vertical: bool = False, force_grid:
                 t = Table(box=None, padding=(0, 1), show_header=True, header_style="bold magenta")
                 t.add_column("#", style="dim", justify="right", width=3)
                 t.add_column("Field", style="bold cyan", width=26, no_wrap=True)
-                t.add_column("Value", style="white", width=22)
+                t.add_column("Value", style="white", width=22, no_wrap=True)
                 t.add_column("│", style="dim", width=1)
                 t.add_column("#", style="dim", justify="right", width=3)
                 t.add_column("Field", style="bold cyan", width=26, no_wrap=True)
-                t.add_column("Value", style="white", width=22)
+                t.add_column("Value", style="white", width=22, no_wrap=True)
 
                 for i in range(mid):
                     idx_1, name_1 = col_l[i]
-                    val_1 = format_val(row[name_1])
-                    if len(val_1) > 22 and "[" not in val_1:
-                        val_1 = val_1[:19] + "..."
+                    val_1 = format_val(row[name_1], max_len=22)
 
                     if i < len(col_r):
                         idx_2, name_2 = col_r[i]
-                        val_2 = format_val(row[name_2])
-                        if len(val_2) > 22 and "[" not in val_2:
-                            val_2 = val_2[:19] + "..."
+                        val_2 = format_val(row[name_2], max_len=22)
                         t.add_row(str(idx_1), name_1, val_1, "│", str(idx_2), name_2, val_2)
                     else:
                         t.add_row(str(idx_1), name_1, val_1, "│", "", "", "")
@@ -268,7 +356,7 @@ def render_card_view(df: pd.DataFrame, force_vertical: bool = False, force_grid:
                 t.add_column("Field Name", style="bold cyan", width=30, no_wrap=True)
                 t.add_column("Value", style="white")
                 for idx, col_name in enumerate(cols, start=1):
-                    t.add_row(str(idx), col_name, format_val(row[col_name]))
+                    t.add_row(str(idx), col_name, format_val(row[col_name], max_len=80))
 
             console.print(Panel(
                 t,
@@ -838,20 +926,22 @@ def print_help_tips(target_name: str, active_id: str):
     else:
         script_call = 'python "Read Data/read_parquet_v2.py"'
 
+    nav_target = f" {target_name}" if target_name not in ("silver1", "trace") else ""
+
     if RICH_AVAILABLE:
         tips = (
             f"[dim]💡 [bold white]Display Tips & Cross-Layer Sync Commands:[/bold white]\n"
             f"  • Trace record across all layers: [bold cyan]{script_call} trace[/bold cyan] (or [cyan]--trace[/cyan])\n"
             f"  • View specific ID in this layer: [bold cyan]{script_call} {target_name} --id {active_id[:8]}[/bold cyan]\n"
-            f"  • Move to next/previous record:   [bold cyan]{script_call} --next[/bold cyan]  /  [bold cyan]{script_call} --prev[/bold cyan]\n"
-            f"  • Pick random record:             [bold cyan]{script_call} --random[/bold cyan]\n"
+            f"  • Move to next/previous record:   [bold cyan]{script_call}{nav_target} --next[/bold cyan]  /  [bold cyan]{script_call}{nav_target} --prev[/bold cyan]\n"
+            f"  • Pick random record:             [bold cyan]{script_call}{nav_target} --random[/bold cyan]\n"
             f"  • View more rows (table view):    [cyan]{script_call} {target_name} 10 --table[/cyan]\n"
             f"  • Interactive Browser / HTML:     [cyan]{script_call} {target_name} --html[/cyan]  (or [cyan]{script_call} trace --html[/cyan])\n"
             f"  • Column catalog / schema:        [cyan]{script_call} {target_name} --schema[/cyan][/dim]"
         )
         console.print(tips)
     else:
-        print(f"\nTips: Run '{script_call} trace' to view this ID across all layers, or '{script_call} --next' for next record.")
+        print(f"\nTips: Run '{script_call} trace' to view this ID across all layers, or '{script_call}{nav_target} --next' for next record.")
 
 def main():
     raw_args = sys.argv[1:]
@@ -909,14 +999,18 @@ def main():
     target_layer = "silver1"
     limit = None
     explicit_limit = False
+    user_specified_layer = False
 
     for a in non_flags:
         lower_a = a.lower()
         if lower_a in TRACE_ALIASES:
-            mode = "trace"
+            if mode == "card":
+                mode = "trace"
             target_layer = "trace"
+            user_specified_layer = True
         elif lower_a in LAYERS:
             target_layer = lower_a
+            user_specified_layer = True
         elif a.isdigit():
             limit = int(a)
             explicit_limit = True
@@ -926,6 +1020,16 @@ def main():
             target_id = a
         else:
             target_layer = a
+            user_specified_layer = True
+
+    if user_specified_layer:
+        set_active_layer(target_layer)
+    else:
+        last_layer = get_active_layer()
+        if last_layer in LAYERS or last_layer in TRACE_ALIASES:
+            target_layer = last_layer
+            if target_layer in TRACE_ALIASES and mode == "card":
+                mode = "trace"
 
     active_id = get_active_id()
 
@@ -934,7 +1038,7 @@ def main():
         set_active_id("e8e76ac3-0376-4540-a532-acf3d735216b")
         active_id = "e8e76ac3-0376-4540-a532-acf3d735216b"
     elif nav_dir:
-        active_id = navigate_active_id(nav_dir, active_id)
+        active_id = navigate_active_id(nav_dir, active_id, layer=target_layer)
 
     # Apply explicit target ID
     if target_id:
@@ -1085,18 +1189,20 @@ def main():
         # Print banner
         print_banner(target_name, count, total_cols, len(df), mode, active_id if use_active_id else None)
 
-        if quarantine_alert:
+        is_quarantine_record = quarantine_alert or (target_name == "quarantine" and len(df) > 0 and "columns_to_remediate" in df.columns)
+        if is_quarantine_record:
             remed = df.iloc[0].get("columns_to_remediate")
+            healing_status = df.iloc[0].get("healing_status", "PENDING")
             if RICH_AVAILABLE:
                 console.print(Panel(
-                    f"[bold red]⚠️ This record failed Silver 2 validation and was isolated into QUARANTINE![/bold red]\n"
-                    f"[yellow]Remediation Needed:[/yellow] {remed}\n"
-                    f"[dim]Displaying the quarantine record below (delta/silver2_quarantine)[/dim]",
-                    title="[bold white on red] Quarantine Alert [/bold white on red]",
+                    f"[bold red]⚠️ Quarantined Record (Failed Silver 2 Validation)[/bold red]\n"
+                    f"[yellow]Columns To Remediate:[/yellow] [bold white]{remed}[/bold white]   │   [cyan]Healing Status:[/cyan] [bold green]{healing_status}[/bold green]\n"
+                    f"[dim]Stored in delta/silver2_quarantine[/dim]",
+                    title="[bold white on red] 🚨 Quarantine Alert [/bold white on red]",
                     border_style="red"
                 ))
             else:
-                print(f"\n[!] QUARANTINE ALERT: Record failed Silver 2 validation! Remediation: {remed}")
+                print(f"\n[!] QUARANTINE: Remediation Needed: {remed} | Status: {healing_status}")
 
         # Render chosen mode
         if mode == "schema":

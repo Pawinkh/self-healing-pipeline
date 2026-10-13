@@ -144,6 +144,7 @@ def run_tests():
     base_rows[0]["damage"] = "OVER $1,500"
     base_rows[0]["posted_speed_limit"] = " 30 "
     base_rows[0]["num_units"] = "2"
+    base_rows[0]["crash_hour"] = "14"
 
     # Row 1: QUARANTINE unmapped / ambiguous record
     base_rows[1]["record_id"] = "REC_QUAR_02"
@@ -158,7 +159,7 @@ def run_tests():
     base_rows[2]["crash_month"] = "OCTOBR"          # Typo of OCTOBER (dist 1)
     base_rows[2]["street_direction"] = "NORTH"
 
-    test_batch_df = spark.createDataFrame(base_rows)
+    test_batch_df = spark.createDataFrame(base_rows, schema=silver1_df.schema)
     processor = make_batch_processor(spark)
 
     print("  -> Executing batch 1...")
@@ -179,7 +180,8 @@ def run_tests():
     assert rec1.crash_date == "2021-03-04", f"Expected 2021-03-04, got {rec1.crash_date}"
     assert rec1.date_police_notified == "2023-09-05 19:42:00", f"Expected 2023-09-05 19:42:00, got {rec1.date_police_notified}"
     assert rec1.posted_speed_limit == 30, f"Expected 30, got {rec1.posted_speed_limit}"
-    print("  -> Slash date & PM timestamp & trimmed speed limit validated in Silver 2: PASSED")
+    assert rec1.crash_hour == "14.00", f"Expected 14.00, got {rec1.crash_hour}"
+    print("  -> Slash date & PM timestamp & trimmed speed limit & crash_hour (hh.00) validated in Silver 2: PASSED")
 
     # Verify Quarantine table
     assert _is_delta_table(spark, TEST_QUARANTINE), "Quarantine table was not created"
@@ -221,8 +223,8 @@ def run_tests():
     ref_df = spark.read.format("delta").load(TEST_REF)
     octobr_rule = ref_df.filter(F.col("raw_synonym") == "OCTOBR").first()
     assert octobr_rule is not None, "OCTOBR rule not found in ref_canonical_mappings"
-    assert octobr_rule.canonical_value == "10", f"Expected '10', got {octobr_rule.canonical_value}"
-    print("  -> Promoted rule OCTOBR -> 10 found in Delta: PASSED")
+    assert octobr_rule.canonical_value == "OCTOBER", f"Expected 'OCTOBER', got {octobr_rule.canonical_value}"
+    print("  -> Promoted rule OCTOBR -> OCTOBER found in Delta: PASSED")
 
     # Re-run promotion: Delta MERGE should insert 0 duplicates
     second_promo = promote_fuzzy_variants(spark, TEST_AUDIT, TEST_REF, threshold=1)

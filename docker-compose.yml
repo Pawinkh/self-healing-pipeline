@@ -68,9 +68,12 @@ services:
     build: ./spark-jobs
     container_name: bronze-job
     command: [ "python", "bronze_job.py" ]
+    restart: on-failure
     volumes:
+      - ./spark-jobs:/app
       - ./delta:/data/delta
       - ./checkpoints:/data/checkpoints
+      - ivy-cache:/root/.ivy2
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPICS: crashes.crash1,crashes.crash2,crashes.crash3
@@ -86,9 +89,12 @@ services:
     build: ./spark-jobs
     container_name: silver1-job
     command: [ "python", "silver1_job.py" ]
+    restart: on-failure
     volumes:
+      - ./spark-jobs:/app
       - ./delta:/data/delta
       - ./checkpoints:/data/checkpoints
+      - ivy-cache:/root/.ivy2
     environment:
       BRONZE_PATH: /data/delta/bronze
       SILVER1_PATH: /data/delta/silver1
@@ -103,9 +109,12 @@ services:
     build: ./spark-jobs
     container_name: silver2-job
     command: [ "python", "silver2_job.py" ]
+    restart: on-failure
     volumes:
+      - ./spark-jobs:/app
       - ./delta:/data/delta
       - ./checkpoints:/data/checkpoints
+      - ivy-cache:/root/.ivy2
     environment:
       SILVER1_PATH: /data/delta/silver1
       SILVER2_PATH: /data/delta/silver2
@@ -124,9 +133,12 @@ services:
     build: ./spark-jobs
     container_name: gold-job
     command: [ "python", "gold_job.py" ]
+    restart: on-failure
     volumes:
+      - ./spark-jobs:/app
       - ./delta:/data/delta
       - ./checkpoints:/data/checkpoints
+      - ivy-cache:/root/.ivy2
     environment:
       SILVER2_PATH: /data/delta/silver2
       GOLD_PATH: /data/delta/gold
@@ -134,3 +146,6 @@ services:
     depends_on:
       silver2-job:
         condition: service_started
+
+volumes:
+  ivy-cache:

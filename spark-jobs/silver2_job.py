@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional
 from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
+    BooleanType,
     DecimalType,
     IntegerType,
     StringType,
@@ -39,6 +40,7 @@ from pyspark.sql.types import (
 
 from common import build_spark, wait_for_delta_table
 from ref_mappings import (
+    ANCHOR_TO_CANONICAL,
     CANONICAL_ANCHORS,
     fuzzy_canonical,
     init_fuzzy_audit,
@@ -213,7 +215,9 @@ def standardize_silver2(df: DataFrame, mapping_dict: Dict[str, Dict[str, str]]) 
 
     # damage & hit_and_run_i (open/complex categories - no fuzzy canonical matching)
     std_damage = _build_map_expr("damage", mapping_dict, raw_damage)
-    std_hit_and_run = _build_map_expr("hit_and_run_i", mapping_dict, raw_hit_and_run)
+    std_hit_and_run = _build_map_expr(
+        "hit_and_run_i", mapping_dict, raw_hit_and_run
+    ).cast(BooleanType())
 
     # street_direction (fuzzy matches NORTH/SOUTH/EAST/WEST -> maps to N/S/E/W)
     exact_street_direction = _build_map_expr("street_direction", mapping_dict, raw_street_direction)
@@ -221,17 +225,13 @@ def standardize_silver2(df: DataFrame, mapping_dict: Dict[str, Dict[str, str]]) 
         raw_street_direction, CANONICAL_ANCHORS["street_direction"]
     )
     effective_fuzzy_dir = F.when(exact_street_direction.isNull(), fuzzy_dir_anchor).otherwise(None)
-    fuzzy_dir_canonical = (
-        F.when(effective_fuzzy_dir == "NORTH", "N")
-        .when(effective_fuzzy_dir == "SOUTH", "S")
-        .when(effective_fuzzy_dir == "EAST", "E")
-        .when(effective_fuzzy_dir == "WEST", "W")
-        .otherwise(None)
+    fuzzy_dir_canonical = _build_map_expr(
+        "street_direction", ANCHOR_TO_CANONICAL, effective_fuzzy_dir
     )
     std_street_direction = F.coalesce(exact_street_direction, fuzzy_dir_canonical)
 
     # 4. Numeric & Time Parsing
-    # crash_hour: ref lookup, 12h/24h timestamp parse, or direct integer cast
+    # crash_hour: ref lookup, 12h/24h timestamp parse, or direct integer/decimal cast -> format as "hh.00"
     hour_from_ref = _build_map_expr("crash_hour", mapping_dict, raw_crash_hour)
     hour_from_ts = F.hour(
         F.coalesce(
@@ -239,59 +239,45 @@ def standardize_silver2(df: DataFrame, mapping_dict: Dict[str, Dict[str, str]]) 
             F.expr("try_to_timestamp(`crash_hour`, 'hh a')"),
             F.expr("try_to_timestamp(`crash_hour`, 'HH:mm')"),
             F.expr("try_to_timestamp(`crash_hour`, 'h:mm a')"),
+            F.expr("try_to_timestamp(`crash_hour`, 'hh:mm a')"),
+            F.expr("try_to_timestamp(`crash_hour`, 'HH.mm')"),
+            F.expr("try_to_timestamp(`crash_hour`, 'h.mm a')"),
+            F.expr("try_to_timestamp(`crash_hour`, 'hh.mm a')"),
         )
     )
+    hour_as_num = F.when(
+        F.trim(raw_crash_hour).rlike(r"^\d{1,2}(\.\d+)?$"),
+        F.trim(raw_crash_hour).cast(DecimalType(10, 2)).cast(IntegerType()),
+    ).otherwise(None)
     candidate_hour = F.coalesce(
-        hour_from_ref.cast(IntegerType()), hour_from_ts, _digits_only(raw_crash_hour)
+        hour_from_ref.cast(IntegerType()), hour_from_ts, hour_as_num, _digits_only(raw_crash_hour)
     )
-    std_crash_hour = F.when(candidate_hour.between(0, 23), candidate_hour).otherwise(None)
+    std_crash_hour = F.when(
+        candidate_hour.between(0, 23),
+        F.format_string("%02d.00", candidate_hour),
+    ).otherwise(None)
 
-    # crash_month: exact lookup -> direct cast -> fuzzy canonical fallback
-    month_from_ref = _build_map_expr("crash_month", mapping_dict, raw_crash_month)
-    candidate_month = F.coalesce(month_from_ref.cast(IntegerType()), _digits_only(raw_crash_month))
-    exact_crash_month = F.when(candidate_month.between(1, 12), candidate_month).otherwise(None)
-
+    # crash_month: exact lookup (from ref or digits) -> fuzzy canonical fallback
+    exact_crash_month = _build_map_expr("crash_month", mapping_dict, raw_crash_month)
     fuzzy_month_anchor = fuzzy_canonical(
         raw_crash_month, CANONICAL_ANCHORS["crash_month"]
     )
     effective_fuzzy_month = F.when(exact_crash_month.isNull(), fuzzy_month_anchor).otherwise(None)
-    fuzzy_month_int = (
-        F.when(effective_fuzzy_month == "JANUARY", 1)
-        .when(effective_fuzzy_month == "FEBRUARY", 2)
-        .when(effective_fuzzy_month == "MARCH", 3)
-        .when(effective_fuzzy_month == "APRIL", 4)
-        .when(effective_fuzzy_month == "MAY", 5)
-        .when(effective_fuzzy_month == "JUNE", 6)
-        .when(effective_fuzzy_month == "JULY", 7)
-        .when(effective_fuzzy_month == "AUGUST", 8)
-        .when(effective_fuzzy_month == "SEPTEMBER", 9)
-        .when(effective_fuzzy_month == "OCTOBER", 10)
-        .when(effective_fuzzy_month == "NOVEMBER", 11)
-        .when(effective_fuzzy_month == "DECEMBER", 12)
-        .otherwise(None)
+    fuzzy_month_canonical = _build_map_expr(
+        "crash_month", ANCHOR_TO_CANONICAL, effective_fuzzy_month
     )
-    std_crash_month = F.coalesce(exact_crash_month, fuzzy_month_int)
+    std_crash_month = F.coalesce(exact_crash_month, fuzzy_month_canonical)
 
-    # crash_day_of_week: exact lookup -> direct cast -> fuzzy canonical fallback
-    day_from_ref = _build_map_expr("crash_day_of_week", mapping_dict, raw_crash_day)
-    candidate_day = F.coalesce(day_from_ref.cast(IntegerType()), _digits_only(raw_crash_day))
-    exact_crash_day = F.when(candidate_day.between(1, 7), candidate_day).otherwise(None)
-
+    # crash_day_of_week: exact lookup (from ref or digits) -> fuzzy canonical fallback
+    exact_crash_day = _build_map_expr("crash_day_of_week", mapping_dict, raw_crash_day)
     fuzzy_day_anchor = fuzzy_canonical(
         raw_crash_day, CANONICAL_ANCHORS["crash_day_of_week"]
     )
     effective_fuzzy_day = F.when(exact_crash_day.isNull(), fuzzy_day_anchor).otherwise(None)
-    fuzzy_day_int = (
-        F.when(effective_fuzzy_day == "SUNDAY", 1)
-        .when(effective_fuzzy_day == "MONDAY", 2)
-        .when(effective_fuzzy_day == "TUESDAY", 3)
-        .when(effective_fuzzy_day == "WEDNESDAY", 4)
-        .when(effective_fuzzy_day == "THURSDAY", 5)
-        .when(effective_fuzzy_day == "FRIDAY", 6)
-        .when(effective_fuzzy_day == "SATURDAY", 7)
-        .otherwise(None)
+    fuzzy_day_canonical = _build_map_expr(
+        "crash_day_of_week", ANCHOR_TO_CANONICAL, effective_fuzzy_day
     )
-    std_crash_day_of_week = F.coalesce(exact_crash_day, fuzzy_day_int)
+    std_crash_day_of_week = F.coalesce(exact_crash_day, fuzzy_day_canonical)
 
     # num_units: ref lookup for words ('one' -> 1.0) or regex numeric extract
     units_from_ref = _build_map_expr("num_units", mapping_dict, raw_num_units)
