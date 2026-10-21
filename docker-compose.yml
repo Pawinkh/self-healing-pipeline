@@ -62,12 +62,14 @@ services:
       kafka:
         condition: service_healthy
 
-  # --- Bronze -------------------------------------------------------
-  # Kafka -> Delta, untouched raw landing.
-  bronze-job:
+  # --- Bronze + Silver 1 -------------------------------------------
+  # One Spark driver, two streaming queries:
+  #   Kafka -> Delta, untouched raw landing (bronze)
+  #   Bronze -> parsed/cleaned via SILVER1_TRANSFORM_SQL (silver1)
+  bronze-silver1-job:
     build: ./spark-jobs
-    container_name: bronze-job
-    command: [ "python", "bronze_job.py" ]
+    container_name: bronze-silver1-job
+    command: [ "python", "run_layers.py", "bronze", "silver1" ]
     restart: on-failure
     volumes:
       - ./spark-jobs:/app
@@ -77,38 +79,22 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPICS: crashes.crash1,crashes.crash2,crashes.crash3
-      DELTA_TABLE_PATH: /data/delta/bronze
-      CHECKPOINT_PATH: /data/checkpoints/bronze
+      BRONZE_PATH: /data/delta/bronze
+      BRONZE_CHECKPOINT_PATH: /data/checkpoints/bronze
+      SILVER1_PATH: /data/delta/silver1
+      SILVER1_CHECKPOINT_PATH: /data/checkpoints/silver1
     depends_on:
       kafka:
         condition: service_healthy
 
-  # --- Silver 1 -----------------------------------------------------
-  # Bronze -> parsed/cleaned via SILVER1_TRANSFORM_SQL.
-  silver1-job:
+  # --- Silver 2 + Gold ----------------------------------------------
+  # One Spark driver, two streaming queries:
+  #   Silver 1 -> standardized via canonical lookups & parsing chains (silver2)
+  #   Silver 2 -> business-ready fields via GOLD_TRANSFORM_SQL (gold)
+  silver2-gold-job:
     build: ./spark-jobs
-    container_name: silver1-job
-    command: [ "python", "silver1_job.py" ]
-    restart: on-failure
-    volumes:
-      - ./spark-jobs:/app
-      - ./delta:/data/delta
-      - ./checkpoints:/data/checkpoints
-      - ivy-cache:/root/.ivy2
-    environment:
-      BRONZE_PATH: /data/delta/bronze
-      SILVER1_PATH: /data/delta/silver1
-      CHECKPOINT_PATH: /data/checkpoints/silver1
-    depends_on:
-      bronze-job:
-        condition: service_started
-
-  # --- Silver 2 -----------------------------------------------------
-  # Silver 1 -> standardized via PySpark canonical lookups & parsing chains.
-  silver2-job:
-    build: ./spark-jobs
-    container_name: silver2-job
-    command: [ "python", "silver2_job.py" ]
+    container_name: silver2-gold-job
+    command: [ "python", "run_layers.py", "silver2", "gold" ]
     restart: on-failure
     volumes:
       - ./spark-jobs:/app
@@ -118,33 +104,15 @@ services:
     environment:
       SILVER1_PATH: /data/delta/silver1
       SILVER2_PATH: /data/delta/silver2
-      CHECKPOINT_PATH: /data/checkpoints/silver2
+      SILVER2_CHECKPOINT_PATH: /data/checkpoints/silver2
       QUARANTINE_PATH: /data/delta/silver2_quarantine
       DEAD_LETTER_PATH: /data/delta/silver2_dead_letter
       REF_MAPPINGS_PATH: /data/delta/ref_canonical_mappings
       FUZZY_AUDIT_PATH: /data/delta/silver2_fuzzy_audit
-    depends_on:
-      silver1-job:
-        condition: service_started
-
-  # --- Gold -------------------------------------------------------
-  # Silver 2 -> business-ready fields via GOLD_TRANSFORM_SQL.
-  gold-job:
-    build: ./spark-jobs
-    container_name: gold-job
-    command: [ "python", "gold_job.py" ]
-    restart: on-failure
-    volumes:
-      - ./spark-jobs:/app
-      - ./delta:/data/delta
-      - ./checkpoints:/data/checkpoints
-      - ivy-cache:/root/.ivy2
-    environment:
-      SILVER2_PATH: /data/delta/silver2
       GOLD_PATH: /data/delta/gold
-      CHECKPOINT_PATH: /data/checkpoints/gold
+      GOLD_CHECKPOINT_PATH: /data/checkpoints/gold
     depends_on:
-      silver2-job:
+      bronze-silver1-job:
         condition: service_started
 
 volumes:

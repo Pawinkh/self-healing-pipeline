@@ -20,7 +20,7 @@ producer --> kafka --> bronze-job --> delta/bronze
 ## Prerequisites
 
 - Docker + Docker Compose v2
-- ~6-8 GB RAM free (Kafka + Spark JVMs, one per layer)
+- ~4 GB RAM free (Kafka + two Spark JVMs)
 
 ## Setup
 
@@ -39,10 +39,12 @@ jars get pulled). Subsequent runs are fast.
 
 - **Kafka UI** — http://localhost:8080 — browse `crashes.crash1`, `crashes.crash2`, `crashes.crash3`
 - **Producer logs** — `[Crash1] Batch N: published 50 rows to 'crashes.crash1'`
-- **bronze-job logs** — prints subscribed topics and streams micro-batches into `delta/bronze`
-- **silver1-job logs** — unpacks JSON into 49 fields and runs formatting/cleaning SQL -> `delta/silver1`
-- **silver2-job logs** — streams from Silver 1 and applies standardization SQL -> `delta/silver2`
-- **gold-job logs** — streams from Silver 2 into business-ready table -> `delta/gold`
+- **bronze-silver1-job logs** — one Spark driver running two queries:
+  - `[bronze]` prints subscribed topics and streams micro-batches into `delta/bronze`
+  - `[silver1]` unpacks JSON into 49 fields and runs formatting/cleaning SQL -> `delta/silver1`
+- **silver2-gold-job logs** — one Spark driver running two queries:
+  - `[silver2]` streams from Silver 1 and applies standardization SQL -> `delta/silver2`
+  - `[gold]` streams from Silver 2 into business-ready table -> `delta/gold`
 
 ## Verify data landed, from the host (no Spark needed)
 
@@ -66,6 +68,10 @@ To stop: `docker compose down`. To wipe all state and start clean:
   (`record_id`, `batch_id`, `table_name`, `ingestion_ts`, `payload`, `**row`).
 - **`spark-jobs/common.py`** — shared Spark session builder and a
   wait-for-upstream-table guard, used by all jobs.
+- **`spark-jobs/run_layers.py`** — runs several layers as streaming queries in
+  one Spark driver (`python run_layers.py bronze silver1`). Compose uses it to
+  run the four layers in two containers instead of four JVMs. Each
+  `<layer>_job.py` exposes `start(spark)` and still runs on its own too.
 - **`spark-jobs/bronze_job.py`** — Kafka → Delta, untouched raw landing. Raw string
   values plus Kafka's own metadata.
 - **`spark-jobs/silver1_job.py`** — Bronze → Silver 1. Unpacks JSON envelope and
@@ -106,7 +112,7 @@ To stop: `docker compose down`. To wipe all state and start clean:
 - Kafka runs in KRaft mode (no ZooKeeper) via the official `apache/kafka`
   image.
 - `pyspark==3.5.3` / `delta-spark==3.3.1` is a verified-compatible pairing.
-- Each Spark job's `depends_on: condition: service_started` only ensures
+- Each Spark service's `depends_on: condition: service_started` only ensures
   container start order for readable logs -- the real safety comes from
   `wait_for_delta_table()` in `common.py`, which polls until the upstream
   table actually exists before starting a stream read on it.

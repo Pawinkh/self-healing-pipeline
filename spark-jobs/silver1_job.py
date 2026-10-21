@@ -7,8 +7,11 @@ be modified for formatting and cleaning logic.
 """
 
 import os
+from typing import Optional
 
+from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, coalesce, from_json
+from pyspark.sql.streaming import StreamingQuery
 from pyspark.sql.types import LongType, StringType, StructField, StructType
 
 from common import build_spark, wait_for_delta_table
@@ -16,7 +19,7 @@ from common import build_spark, wait_for_delta_table
 BRONZE_PATH = os.environ.get("BRONZE_PATH", "/data/delta/bronze")
 SILVER1_PATH = os.environ.get("SILVER1_PATH", "/data/delta/silver1")
 CHECKPOINT_PATH = os.environ.get(
-    "CHECKPOINT_PATH", "/data/checkpoints/silver1"
+    "SILVER1_CHECKPOINT_PATH", "/data/checkpoints/silver1"
 )
 
 CRASH_COLUMNS = [
@@ -147,10 +150,9 @@ FROM bronze_flat
 """
 
 
-def main():
-    spark = build_spark("Silver1CleanTransform")
-
-    wait_for_delta_table(BRONZE_PATH)
+def start(spark: SparkSession, upstream: Optional[StreamingQuery] = None) -> StreamingQuery:
+    """Start the Silver 1 query on `spark`; `upstream` is the Bronze query if it shares this driver."""
+    wait_for_delta_table(BRONZE_PATH, upstream=upstream)
 
     bronze_stream = spark.readStream.format("delta").load(BRONZE_PATH)
 
@@ -176,6 +178,7 @@ def main():
 
     query = (
         silver1.writeStream.format("delta")
+        .queryName("silver1")
         .trigger(processingTime="10 seconds")
         .option("checkpointLocation", CHECKPOINT_PATH)
         .outputMode("append")
@@ -183,7 +186,11 @@ def main():
     )
 
     print(f"[silver1] Streaming {BRONZE_PATH} -> {SILVER1_PATH}")
-    query.awaitTermination()
+    return query
+
+
+def main():
+    start(build_spark("Silver1CleanTransform")).awaitTermination()
 
 
 if __name__ == "__main__":

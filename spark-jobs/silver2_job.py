@@ -31,6 +31,7 @@ from typing import Any, Dict, Optional
 
 from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.streaming import StreamingQuery
 from pyspark.sql.types import (
     BooleanType,
     DecimalType,
@@ -50,7 +51,7 @@ from ref_mappings import (
 
 SILVER1_PATH = os.environ.get("SILVER1_PATH", "/data/delta/silver1")
 SILVER2_PATH = os.environ.get("SILVER2_PATH", "/data/delta/silver2")
-CHECKPOINT_PATH = os.environ.get("CHECKPOINT_PATH", "/data/checkpoints/silver2")
+CHECKPOINT_PATH = os.environ.get("SILVER2_CHECKPOINT_PATH", "/data/checkpoints/silver2")
 QUARANTINE_PATH = os.environ.get("QUARANTINE_PATH", "/data/delta/silver2_quarantine")
 DEAD_LETTER_PATH = os.environ.get(
     "DEAD_LETTER_PATH", "/data/delta/silver2_dead_letter"
@@ -535,8 +536,8 @@ def _require_spark_version(spark: SparkSession) -> None:
         )
 
 
-def main():
-    spark = build_spark("Silver2StandardizeTransform")
+def start(spark: SparkSession, upstream: Optional[StreamingQuery] = None) -> StreamingQuery:
+    """Start the Silver 2 query on `spark`; `upstream` is the Silver 1 query if it shares this driver."""
     _require_spark_version(spark)
 
     # Initialize reference canonical mappings if table does not exist
@@ -546,7 +547,7 @@ def main():
     init_fuzzy_audit(spark, FUZZY_AUDIT_PATH)
 
     # Wait for upstream Silver 1 Delta table
-    wait_for_delta_table(SILVER1_PATH)
+    wait_for_delta_table(SILVER1_PATH, upstream=upstream)
 
     reader = spark.readStream.format("delta")
     if SILVER1_SKIP_CHANGE_COMMITS:
@@ -557,7 +558,8 @@ def main():
 
     # foreachBatch owns all writes, so no sink format is set on the writeStream
     query = (
-        silver1_stream.writeStream.trigger(processingTime="10 seconds")
+        silver1_stream.writeStream.queryName("silver2")
+        .trigger(processingTime="10 seconds")
         .option("checkpointLocation", CHECKPOINT_PATH)
         .foreachBatch(batch_processor)
         .start()
@@ -568,7 +570,11 @@ def main():
         f"(Quarantine: {QUARANTINE_PATH}, Audit: {FUZZY_AUDIT_PATH}, "
         f"Dead letter: {DEAD_LETTER_PATH})"
     )
-    query.awaitTermination()
+    return query
+
+
+def main():
+    start(build_spark("Silver2StandardizeTransform")).awaitTermination()
 
 
 if __name__ == "__main__":
