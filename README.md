@@ -45,6 +45,9 @@ jars get pulled). Subsequent runs are fast.
 - **silver2-gold-job logs** — one Spark driver running two queries:
   - `[silver2]` streams from Silver 1 and applies standardization SQL -> `delta/silver2`
   - `[gold]` streams from Silver 2 into business-ready table -> `delta/gold`
+- **lineage-consumer logs** — `[lineage] write_gold COMPLETED (n of m events written)`
+- **Neo4j browser** — http://localhost:7474 (user `neo4j`, password `NEO4J_PASSWORD`, default
+  `selfhealing`) — try `MATCH p=(:Table)-[:FEEDS*]->(:Table) RETURN p`
 
 ## Verify data landed, from the host (no Spark needed)
 
@@ -80,9 +83,41 @@ To stop: `docker compose down`. To wipe all state and start clean:
   `SILVER2_TRANSFORM_SQL` for data standardization.
 - **`spark-jobs/gold_job.py`** — Silver 2 → Gold. Provides
   `GOLD_TRANSFORM_SQL` for business-ready fields and metrics.
+- **`lineage/`** — pipeline lineage in Neo4j. See [Lineage](#lineage) below.
 - **`delta/{bronze,silver1,silver2,gold}`** — the four Lakehouse tables.
   Inspect with `verify_delta.py`.
 - **`checkpoints/`** — Structured Streaming's checkpoint state per job.
+
+## Lineage
+
+Every Spark job carries the `openlineage-spark` listener (wired in
+`spark-jobs/common.py`). It publishes OpenLineage events to the Kafka topic
+`openlineage.events`; `lineage-consumer` reads them and writes the graph into Neo4j
+(spec KG1):
+
+```
+Spark jobs --OpenLineage events--> kafka: openlineage.events --> lineage-consumer --> Neo4j
+```
+
+- `lineage/normalize.py` keeps only the events that write a pipeline table and maps
+  paths to table names (`/data/delta/silver2` becomes `silver2`). The raw stream is
+  mostly Spark-internal plans and `_delta_log` reads, which carry no lineage.
+- `lineage/graph.py` merges `(:Job)`, `(:Run)`, `(:Table)`, `(:SchemaVersion)` and
+  `(:Table)-[:FEEDS]->(:Table)` into Neo4j. Every statement is a `MERGE`, so a replayed
+  event changes nothing. The `:Table` nodes are the ones incidents attach to.
+- `graph.downstream_tables()` / `upstream_tables()` answer "what does a failure in
+  `silver2` reach" for the Deterministic Lookup step.
+
+The listener must be **openlineage-spark 1.53.0 or newer** (pinned to 1.54.0). Earlier
+versions do not report the Gold write, so the `silver2 -> gold` edge is missing.
+
+Set `OPENLINEAGE_ENABLED=false` on a Spark service to turn the listener off.
+
+Neo4j only applies `lineage/schema.cypher` when `neo4j-init` runs. If your Neo4j
+container already exists, apply the new constraints once with
+`docker compose up neo4j-init`.
+
+Unit tests (no Kafka or Neo4j needed): `cd lineage && python -m pytest tests`.
 
 ## Swapping in the real dataset later
 
@@ -102,8 +137,6 @@ To stop: `docker compose down`. To wipe all state and start clean:
   simulated source, deliberately rename/drop a field mid-stream.
 - **Fault injection harness** — a corruption step between the CSV and the
   producer.
-- **Lineage capture** — `openlineage-spark` as a Spark listener, pointed
-  at a webhook that writes into Neo4j.
 - **Detect/triage layer** — Great Expectations checkpoints on `silver_cars`,
   plus the severity-classification logic from the architecture doc.
 
