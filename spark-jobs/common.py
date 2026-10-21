@@ -21,8 +21,21 @@ from pyspark.sql.streaming import StreamingQuery
 SCALA_VERSION = "2.12"
 SPARK_VERSION = "3.5.3"
 
+# openlineage-spark reports the Delta streaming sink (Gold) as an output only
+# from 1.53.0; earlier versions drop the silver2 -> gold edge. Don't go below it.
+OPENLINEAGE_VERSION = "1.54.0"
+OPENLINEAGE_LISTENER = "io.openlineage.spark.agent.OpenLineageSparkListener"
+
+
+def _openlineage_enabled() -> bool:
+    return (
+        os.environ.get("OPENLINEAGE_ENABLED", "true").lower() == "true"
+        and bool(os.environ.get("OPENLINEAGE_KAFKA_BOOTSTRAP_SERVERS"))
+    )
+
 
 def build_spark(app_name: str, driver_memory: str = "1g") -> SparkSession:
+    packages = [f"org.apache.spark:spark-sql-kafka-0-10_{SCALA_VERSION}:{SPARK_VERSION}"]
     builder = (
         SparkSession.builder.appName(app_name)
         .config("spark.driver.memory", driver_memory)
@@ -33,12 +46,32 @@ def build_spark(app_name: str, driver_memory: str = "1g") -> SparkSession:
             "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         )
     )
-    spark = configure_spark_with_delta_pip(
-        builder,
-        extra_packages=[
-            f"org.apache.spark:spark-sql-kafka-0-10_{SCALA_VERSION}:{SPARK_VERSION}"
-        ],
-    ).getOrCreate()
+    if _openlineage_enabled():
+        # Lineage events go to Kafka; lineage/consumer.py writes them to Neo4j.
+        packages.append(f"io.openlineage:openlineage-spark_{SCALA_VERSION}:{OPENLINEAGE_VERSION}")
+        builder = (
+            builder.config("spark.extraListeners", OPENLINEAGE_LISTENER)
+            .config("spark.openlineage.namespace", os.environ.get("OPENLINEAGE_NAMESPACE", "self-healing-pipeline"))
+            .config("spark.openlineage.transport.type", "kafka")
+            .config(
+                "spark.openlineage.transport.topicName",
+                os.environ.get("OPENLINEAGE_TOPIC", "openlineage.events"),
+            )
+            .config(
+                "spark.openlineage.transport.properties.bootstrap.servers",
+                os.environ["OPENLINEAGE_KAFKA_BOOTSTRAP_SERVERS"],
+            )
+            # The transport passes these straight to the Kafka producer, which has no default.
+            .config(
+                "spark.openlineage.transport.properties.key.serializer",
+                "org.apache.kafka.common.serialization.StringSerializer",
+            )
+            .config(
+                "spark.openlineage.transport.properties.value.serializer",
+                "org.apache.kafka.common.serialization.StringSerializer",
+            )
+        )
+    spark = configure_spark_with_delta_pip(builder, extra_packages=packages).getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     return spark
 

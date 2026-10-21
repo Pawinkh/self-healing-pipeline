@@ -33,7 +33,7 @@
 //   (:Incident)-[:AFFECTS]->(:Table {name})   table the failure was detected in; lets
 //                                             the blast radius query start from an incident
 //
-// `Table` nodes belong to the lineage writer (task 3.3); incidents MERGE on `name` only.
+// `Table` nodes belong to the lineage writer (lineage/graph.py, below); incidents MERGE on `name` only.
 
 CREATE CONSTRAINT incident_id_unique IF NOT EXISTS
 FOR (i:Incident) REQUIRE i.incident_id IS UNIQUE;
@@ -56,3 +56,31 @@ OPTIONS {indexConfig: {
   `vector.dimensions`: 768,
   `vector.similarity_function`: 'cosine'
 }};
+
+// ---------------------------------------------------------------------------
+// Pipeline lineage (spec KG1, TA1, DL1)  -- task 3.3
+// ---------------------------------------------------------------------------
+// Written by lineage/consumer.py from the OpenLineage events the Spark listener
+// publishes to Kafka. See lineage/graph.py for the full model:
+//
+//   (:Job {name})                              one per target table, e.g. "write_silver2"
+//   (:Run {run_id})-[:RUN_OF]->(:Job)          one per Spark write (a micro-batch)
+//   (:Run|:Job)-[:READS|WRITES]->(:Table)
+//   (:Table {name, kind})-[:FEEDS {job}]->(:Table)   input -> output; blast radius walks this
+//   (:Table)-[:HAS_SCHEMA]->(:SchemaVersion {version_id, hash, fields})
+//
+// Blast radius of a failing table:
+//   MATCH (:Table {name: "silver2"})-[:FEEDS*1..]->(d:Table) RETURN DISTINCT d.name
+
+CREATE CONSTRAINT table_name_unique IF NOT EXISTS
+FOR (t:Table) REQUIRE t.name IS UNIQUE;
+
+CREATE CONSTRAINT job_name_unique IF NOT EXISTS
+FOR (j:Job) REQUIRE j.name IS UNIQUE;
+
+CREATE CONSTRAINT run_id_unique IF NOT EXISTS
+FOR (r:Run) REQUIRE r.run_id IS UNIQUE;
+
+// "<table>:<hash>"; a composite node key would need Enterprise edition.
+CREATE CONSTRAINT schema_version_id_unique IF NOT EXISTS
+FOR (v:SchemaVersion) REQUIRE v.version_id IS UNIQUE;
