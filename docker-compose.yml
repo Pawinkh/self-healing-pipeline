@@ -115,5 +115,43 @@ services:
       bronze-silver1-job:
         condition: service_started
 
+  # --- Knowledge graph -----------------------------------------------
+  # Lineage metadata (OpenLineage) and the incident corpus (vector index).
+  # Browser: http://localhost:7474   Bolt: bolt://localhost:7687
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: neo4j
+    ports:
+      - "7474:7474" # HTTP browser
+      - "7687:7687" # Bolt
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-selfhealing}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: [ "CMD-SHELL", "cypher-shell -u neo4j -p '${NEO4J_PASSWORD:-selfhealing}' 'RETURN 1' || exit 1" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # One-shot: applies lineage/schema.cypher (idempotent) and exits.
+  neo4j-init:
+    image: neo4j:5.26-community
+    container_name: neo4j-init
+    restart: "no"
+    entrypoint: [ "sh", "-c", "cypher-shell -a bolt://neo4j:7687 -u neo4j -p '${NEO4J_PASSWORD:-selfhealing}' -f /schema/schema.cypher" ]
+    volumes:
+      - ./lineage/schema.cypher:/schema/schema.cypher:ro
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
 volumes:
   ivy-cache:
+  neo4j-data:
+  neo4j-logs:
