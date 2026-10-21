@@ -69,6 +69,8 @@ CANONICAL_TAXONOMY: Dict[str, Dict[str, List[str]]] = {
         "DAYLIGHT": ["D", "MORNING", "DAY"],
         "DARKNESS, LIGHTED ROAD": ["N, L", "NIGHT, LIGHTED", "NIGHT WITH LIGHT"],
         "DARKNESS": ["N", "NIGHT"],
+        "DUSK": [],
+        "DAWN": [],
         "UNKNOWN": ["U", "NOT KNOWN"],
     },
     "street_direction": {
@@ -101,8 +103,8 @@ CANONICAL_TAXONOMY: Dict[str, Dict[str, List[str]]] = {
         "SATURDAY": ["SAT", "SA", "7", "07"],
     },
     "hit_and_run_i": {
-        "TRUE": ["Y", "YES", "RIGHT", "T", "1"],
-        "FALSE": ["N", "NO", "WRONG", "F", "0"],
+        "TRUE": ["Y", "YES", "RIGHT", "T", "1", "1.0"],
+        "FALSE": ["N", "NO", "WRONG", "F", "0", "0.0"],
     },
     "damage": {
         "OVER $1,500": ["> $1500", "HIGH"],
@@ -116,6 +118,15 @@ CANONICAL_TAXONOMY: Dict[str, Dict[str, List[str]]] = {
         "4.0": ["FOUR"],
         "5.0": ["FIVE"],
         "6.0": ["SIX"],
+        "7.0": ["SEVEN"],
+        "8.0": ["EIGHT"],
+        "9.0": ["NINE"],
+        "10.0": ["TEN"],
+        "11.0": ["ELEVEN"],
+        "12.0": ["TWELVE"],
+        "13.0": ["THIRTEEN"],
+        "14.0": ["FOURTEEN"],
+        "15.0": ["FIFTEEN"],
     },
 }
 
