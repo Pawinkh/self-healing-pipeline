@@ -19,4 +19,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY *.py ./
 
 # Overridden per-service in docker-compose.yml.
-CMD ["python", "bronze_job.py"]
+CMD ["python", "run_layers.py", "bronze", "silver1"]

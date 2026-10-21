@@ -67,6 +67,7 @@ import glob
 import json
 import re
 import webbrowser
+from functools import lru_cache
 from typing import Optional, Dict, Any, Tuple, List
 
 # Fix Windows encoding for unicode box drawing & symbols in terminal
@@ -80,6 +81,7 @@ if sys.platform == "win32":
 # pyrefly: ignore [missing-import]
 import duckdb
 import pandas as pd
+from deltalake import DeltaTable
 
 # Check Rich library for beautiful terminal formatting
 try:
@@ -102,29 +104,69 @@ ACTIVE_ID_FILE = os.path.join(SCRIPT_DIR, ".active_id")
 ACTIVE_LAYER_FILE = os.path.join(SCRIPT_DIR, ".active_layer")
 
 def resolve_layer_path(relative_path: str) -> str:
-    """Resolves path whether script is executed from project root or Read Data/ folder."""
+    """Resolves a table folder whether script is executed from project root or Read Data/ folder."""
     clean_rel = relative_path.lstrip("./")
     from_root = os.path.join(PROJECT_ROOT, clean_rel)
-    if glob.glob(from_root):
+    if os.path.isdir(from_root):
         return from_root
-    if os.path.exists(os.path.dirname(relative_path)):
+    if os.path.isdir(relative_path):
         return relative_path
     return from_root
 
-# Mapping of folder names for your pipeline layers
+# Mapping of Delta table folders for your pipeline layers
 LAYERS = {
-    "bronze": resolve_layer_path("./delta/bronze/part-*.parquet"),
-    "silver1": resolve_layer_path("./delta/silver1/part-*.parquet"),
-    "silver2": resolve_layer_path("./delta/silver2/part-*.parquet"),
-    "gold": resolve_layer_path("./delta/gold/part-*.parquet"),
-    "audit": resolve_layer_path("./delta/silver2_fuzzy_audit/part-*.parquet"),
-    "quarantine": resolve_layer_path("./delta/silver2_quarantine/part-*.parquet"),
-    "ref": resolve_layer_path("./delta/ref_canonical_mappings/part-*.parquet"),
+    "bronze": resolve_layer_path("./delta/bronze"),
+    "silver1": resolve_layer_path("./delta/silver1"),
+    "silver2": resolve_layer_path("./delta/silver2"),
+    "gold": resolve_layer_path("./delta/gold"),
+    "audit": resolve_layer_path("./delta/silver2_fuzzy_audit"),
+    "quarantine": resolve_layer_path("./delta/silver2_quarantine"),
+    "ref": resolve_layer_path("./delta/ref_canonical_mappings"),
     # Aliases
-    "silver": resolve_layer_path("./delta/silver1/part-*.parquet"),
-    "silver_cars": resolve_layer_path("./delta/silver_cars/part-*.parquet"),
-    "gold_car_overview": resolve_layer_path("./delta/gold_car_overview/part-*.parquet"),
+    "silver": resolve_layer_path("./delta/silver1"),
+    "silver_cars": resolve_layer_path("./delta/silver_cars"),
+    "gold_car_overview": resolve_layer_path("./delta/gold_car_overview"),
 }
+
+def _sql_str(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+@lru_cache(maxsize=None)
+def layer_source(path: str) -> str:
+    """
+    DuckDB FROM-clause source for a Delta table folder (or a plain Parquet path/glob).
+
+    A Delta folder also keeps files that compaction, MERGE or overwrite have
+    logically removed, so globbing part-*.parquet would double-count rows. Only
+    the files in the table's current snapshot are read. union_by_name lines up
+    columns for tables written with mergeSchema (quarantine, audit).
+    Raises FileNotFoundError if there is nothing to read yet.
+    """
+    if os.path.isdir(os.path.join(path, "_delta_log")):
+        files = DeltaTable(path).file_uris()
+        if not files:
+            raise FileNotFoundError(f"Delta table at {path} has no data files yet")
+        file_list = "[" + ", ".join(_sql_str(f) for f in files) + "]"
+    elif glob.glob(path):
+        file_list = _sql_str(path)
+    else:
+        raise FileNotFoundError(f"No Delta table or Parquet files at {path}")
+    return f"read_parquet({file_list}, union_by_name = true)"
+
+def find_bronze_row(src: str, rec_id: str) -> pd.DataFrame:
+    """
+    Bronze row for rec_id. The producer uses record_id as the Kafka key, so try an
+    exact kafka_key match first. The broad match (key prefix, or the id anywhere in
+    the raw JSON, e.g. a crash_record_id) scans every raw_value string, so it only
+    runs when the exact match finds nothing.
+    """
+    df = duckdb.sql(f"SELECT * FROM {src} WHERE kafka_key = '{rec_id}' LIMIT 1").df()
+    if len(df) == 0:
+        df = duckdb.sql(
+            f"SELECT * FROM {src} "
+            f"WHERE kafka_key LIKE '{rec_id}%' OR raw_value LIKE '%{rec_id}%' LIMIT 1"
+        ).df()
+    return df
 
 TRACE_ALIASES = {"trace", "pipeline", "all", "compare", "lineage", "journey"}
 
@@ -162,8 +204,8 @@ def get_active_id() -> str:
 
     # Find a default anchor ID present in silver1 / gold
     try:
-        s1_path = LAYERS["silver1"]
-        anchor = duckdb.sql(f"SELECT record_id FROM '{s1_path}' WHERE record_id IS NOT NULL LIMIT 1").fetchone()
+        s1_src = layer_source(LAYERS["silver1"])
+        anchor = duckdb.sql(f"SELECT record_id FROM {s1_src} WHERE record_id IS NOT NULL LIMIT 1").fetchone()
         if anchor and anchor[0]:
             set_active_id(anchor[0])
             return anchor[0]
@@ -194,20 +236,21 @@ def navigate_active_id(direction: str, current_id: str, layer: str = "silver1") 
     id_col = "kafka_key" if nav_layer == "bronze" else "record_id"
     new_id = None
     try:
+        src = layer_source(pat)
         if direction == "next":
-            res = duckdb.sql(f"SELECT {id_col} FROM '{pat}' WHERE {id_col} > '{current_id}' ORDER BY {id_col} ASC LIMIT 1").fetchone()
+            res = duckdb.sql(f"SELECT {id_col} FROM {src} WHERE {id_col} > '{current_id}' ORDER BY {id_col} ASC LIMIT 1").fetchone()
             if not res or not res[0]:
-                res = duckdb.sql(f"SELECT {id_col} FROM '{pat}' ORDER BY {id_col} ASC LIMIT 1").fetchone()
+                res = duckdb.sql(f"SELECT {id_col} FROM {src} ORDER BY {id_col} ASC LIMIT 1").fetchone()
             if res:
                 new_id = str(res[0])
         elif direction == "prev":
-            res = duckdb.sql(f"SELECT {id_col} FROM '{pat}' WHERE {id_col} < '{current_id}' ORDER BY {id_col} DESC LIMIT 1").fetchone()
+            res = duckdb.sql(f"SELECT {id_col} FROM {src} WHERE {id_col} < '{current_id}' ORDER BY {id_col} DESC LIMIT 1").fetchone()
             if not res or not res[0]:
-                res = duckdb.sql(f"SELECT {id_col} FROM '{pat}' ORDER BY {id_col} DESC LIMIT 1").fetchone()
+                res = duckdb.sql(f"SELECT {id_col} FROM {src} ORDER BY {id_col} DESC LIMIT 1").fetchone()
             if res:
                 new_id = str(res[0])
         elif direction == "random":
-            res = duckdb.sql(f"SELECT {id_col} FROM '{pat}' ORDER BY random() LIMIT 1").fetchone()
+            res = duckdb.sql(f"SELECT {id_col} FROM {src} ORDER BY random() LIMIT 1").fetchone()
             if res:
                 new_id = str(res[0])
     except Exception:
@@ -398,10 +441,7 @@ def fetch_record_across_pipeline(rec_id: str, unpack_bronze: bool = True) -> Dic
 
     # Bronze
     try:
-        b_df = duckdb.sql(
-            f"SELECT * FROM '{LAYERS['bronze']}' "
-            f"WHERE kafka_key = '{rec_id}' OR kafka_key LIKE '{rec_id}%' OR raw_value LIKE '%{rec_id}%' LIMIT 1"
-        ).df()
+        b_df = find_bronze_row(layer_source(LAYERS['bronze']), rec_id)
         if len(b_df) > 0:
             results['bronze'] = unpack_bronze_record(b_df) if unpack_bronze else b_df
         else:
@@ -412,7 +452,7 @@ def fetch_record_across_pipeline(rec_id: str, unpack_bronze: bool = True) -> Dic
     # Silver 1
     try:
         s1_df = duckdb.sql(
-            f"SELECT * FROM '{LAYERS['silver1']}' "
+            f"SELECT * FROM {layer_source(LAYERS['silver1'])} "
             f"WHERE record_id = '{rec_id}' OR record_id LIKE '{rec_id}%' OR crash_record_id = '{rec_id}' OR crash_record_id LIKE '{rec_id}%' LIMIT 1"
         ).df()
         results['silver1'] = s1_df if len(s1_df) > 0 else None
@@ -422,7 +462,7 @@ def fetch_record_across_pipeline(rec_id: str, unpack_bronze: bool = True) -> Dic
     # Silver 2
     try:
         s2_df = duckdb.sql(
-            f"SELECT * FROM '{LAYERS['silver2']}' "
+            f"SELECT * FROM {layer_source(LAYERS['silver2'])} "
             f"WHERE record_id = '{rec_id}' OR record_id LIKE '{rec_id}%' OR crash_record_id = '{rec_id}' OR crash_record_id LIKE '{rec_id}%' LIMIT 1"
         ).df()
         results['silver2'] = s2_df if len(s2_df) > 0 else None
@@ -432,7 +472,7 @@ def fetch_record_across_pipeline(rec_id: str, unpack_bronze: bool = True) -> Dic
     # Silver 2 Quarantine
     try:
         q_df = duckdb.sql(
-            f"SELECT * FROM '{LAYERS['quarantine']}' "
+            f"SELECT * FROM {layer_source(LAYERS['quarantine'])} "
             f"WHERE record_id = '{rec_id}' OR record_id LIKE '{rec_id}%' OR crash_record_id = '{rec_id}' OR crash_record_id LIKE '{rec_id}%' LIMIT 1"
         ).df()
         results['quarantine'] = q_df if len(q_df) > 0 else None
@@ -442,7 +482,7 @@ def fetch_record_across_pipeline(rec_id: str, unpack_bronze: bool = True) -> Dic
     # Gold
     try:
         g_df = duckdb.sql(
-            f"SELECT * FROM '{LAYERS['gold']}' "
+            f"SELECT * FROM {layer_source(LAYERS['gold'])} "
             f"WHERE record_id = '{rec_id}' OR record_id LIKE '{rec_id}%' OR crash_record_id = '{rec_id}' OR crash_record_id LIKE '{rec_id}%' LIMIT 1"
         ).df()
         results['gold'] = g_df if len(g_df) > 0 else None
@@ -452,7 +492,7 @@ def fetch_record_across_pipeline(rec_id: str, unpack_bronze: bool = True) -> Dic
     # Fuzzy Audit
     try:
         a_df = duckdb.sql(
-            f"SELECT * FROM '{LAYERS['audit']}' "
+            f"SELECT * FROM {layer_source(LAYERS['audit'])} "
             f"WHERE record_id = '{rec_id}' OR record_id LIKE '{rec_id}%' LIMIT 10"
         ).df()
         results['audit'] = a_df if len(a_df) > 0 else None
@@ -1089,14 +1129,15 @@ def main():
 
     try:
         # Check files exist
-        matched = glob.glob(parquet_pattern)
-        if not matched:
-            print(f"\n[!] No Parquet files found at: {parquet_pattern}")
+        try:
+            src = layer_source(parquet_pattern)
+        except FileNotFoundError as e:
+            print(f"\n[!] Nothing to read: {e}")
             print("Note: If the pipeline hasn't run yet, start it with `docker compose up` first to generate data.")
             return None
 
         # Row count
-        count = duckdb.sql(f"SELECT COUNT(*) FROM '{parquet_pattern}'").fetchone()[0]
+        count = duckdb.sql(f"SELECT COUNT(*) FROM {src}").fetchone()[0]
 
         is_bronze = (target_name == "bronze")
         use_active_id = (not no_sync) and (not show_all) and (not explicit_limit) and (mode != "schema")
@@ -1107,16 +1148,12 @@ def main():
         if use_active_id:
             # Query the synced active record ID
             if is_bronze:
-                b_query = (
-                    f"SELECT * FROM '{parquet_pattern}' "
-                    f"WHERE kafka_key = '{active_id}' OR kafka_key LIKE '{active_id}%' OR raw_value LIKE '%{active_id}%' LIMIT 1"
-                )
-                b_df = duckdb.sql(b_query).df()
+                b_df = find_bronze_row(src, active_id)
                 if len(b_df) > 0:
                     df = unpack_bronze_record(b_df) if not raw_bronze else b_df
             else:
                 q_single = (
-                    f"SELECT * FROM '{parquet_pattern}' "
+                    f"SELECT * FROM {src} "
                     f"WHERE record_id = '{active_id}' OR record_id LIKE '{active_id}%' "
                     f"OR crash_record_id = '{active_id}' OR crash_record_id LIKE '{active_id}%' LIMIT 1"
                 )
@@ -1125,9 +1162,9 @@ def main():
                     df = res_df
                 elif target_name in ("silver2", "gold"):
                     # Check if the record was quarantined during Silver 2 validation!
-                    quar_pat = LAYERS["quarantine"]
+                    quar_src = layer_source(LAYERS["quarantine"])
                     q_check = (
-                        f"SELECT * FROM '{quar_pat}' "
+                        f"SELECT * FROM {quar_src} "
                         f"WHERE record_id = '{active_id}' OR record_id LIKE '{active_id}%' "
                         f"OR crash_record_id = '{active_id}' OR crash_record_id LIKE '{active_id}%' LIMIT 1"
                     )
@@ -1143,11 +1180,16 @@ def main():
                 return None
 
             # Multi-record / schema / fallback query with deterministic ordering
-            order_clause = "ORDER BY kafka_timestamp ASC, offset ASC" if is_bronze else "ORDER BY kafka_timestamp ASC, record_id ASC"
-            base_query = f"SELECT * FROM '{parquet_pattern}' {order_clause}"
+            # Only sort by columns this table has (ref/audit have no kafka_timestamp);
+            # quoted because "offset" is a reserved word in DuckDB
+            table_cols = {r[0] for r in duckdb.sql(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+            sort_cols = ["kafka_timestamp", "offset"] if is_bronze else ["kafka_timestamp", "record_id"]
+            sort_cols = [c for c in sort_cols if c in table_cols]
+            order_clause = ("ORDER BY " + ", ".join(f'"{c}" ASC' for c in sort_cols)) if sort_cols else ""
+            base_query = f"SELECT * FROM {src} {order_clause}"
 
             if mode == "schema":
-                df = duckdb.sql(f"SELECT * FROM '{parquet_pattern}' LIMIT 500").df()
+                df = duckdb.sql(f"SELECT * FROM {src} LIMIT 500").df()
             elif show_all:
                 df = duckdb.sql(base_query).df()
             elif explicit_limit:
@@ -1211,7 +1253,7 @@ def main():
             if explicit_limit:
                 df_html = df
             elif not show_all:
-                df_html = duckdb.sql(f"SELECT * FROM '{parquet_pattern}' LIMIT 100").df()
+                df_html = duckdb.sql(f"SELECT * FROM {src} LIMIT 100").df()
             else:
                 df_html = df
             html_path = generate_html_viewer(df_html, target_name, count, active_id=active_id if use_active_id else None)
