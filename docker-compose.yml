@@ -42,74 +42,140 @@ services:
         condition: service_healthy
 
   # --- Producer -------------------------------------------------------
-  # Replays a CSV as if it were a live feed. Points at the bundled mock
-  # dataset by default -- swap CSV_PATH (and the mounted file) to point at
-  # the real dataset later, no code changes needed here.
+  # Replays partitioned CSV tables as live feeds into Kafka.
   producer:
     build: ./producer
     container_name: producer
     volumes:
       - ./data:/data:ro
     environment:
-      CSV_PATH: /data/mock_cars.csv
+      DATA_DIR: /data
+      TABLES: Crash1,Crash2,Crash3
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      KAFKA_TOPIC: cars.raw
-      BATCH_SIZE: "5"
-      BATCH_INTERVAL_SECONDS: "5"
-      LOOP_FOREVER: "true"
+      KAFKA_TOPIC_PREFIX: crashes
+      TOPIC_PER_TABLE: "true"
+      BATCH_SIZE: "50"
+      BATCH_INTERVAL_SECONDS: "3"
+      LOOP_FOREVER: "false"
+      STREAMING_MODE: "interleaved"
     depends_on:
       kafka:
         condition: service_healthy
 
-  # --- Bronze -------------------------------------------------------
-  # Kafka -> Delta, untouched raw landing.
-  bronze-job:
+  # --- Bronze + Silver 1 -------------------------------------------
+  # One Spark driver, two streaming queries:
+  #   Kafka -> Delta, untouched raw landing (bronze)
+  #   Bronze -> parsed/cleaned via SILVER1_TRANSFORM_SQL (silver1)
+  bronze-silver1-job:
     build: ./spark-jobs
-    container_name: bronze-job
-    command: [ "python", "bronze_job.py" ]
+    container_name: bronze-silver1-job
+    command: [ "python", "run_layers.py", "bronze", "silver1" ]
+    restart: on-failure
     volumes:
+      - ./spark-jobs:/app
       - ./delta:/data/delta
       - ./checkpoints:/data/checkpoints
+      - ivy-cache:/root/.ivy2
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      KAFKA_TOPIC: cars.raw
-      DELTA_TABLE_PATH: /data/delta/bronze
-      CHECKPOINT_PATH: /data/checkpoints/bronze
-    depends_on:
-      kafka:
-        condition: service_healthy
-
-  # --- Silver -------------------------------------------------------
-  # Bronze -> parsed/typed/cleaned, via one SQL transform.
-  silver-job:
-    build: ./spark-jobs
-    container_name: silver-job
-    command: [ "python", "silver_job.py" ]
-    volumes:
-      - ./delta:/data/delta
-      - ./checkpoints:/data/checkpoints
-    environment:
+      KAFKA_TOPICS: crashes.crash1,crashes.crash2,crashes.crash3
+      OPENLINEAGE_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OPENLINEAGE_TOPIC: openlineage.events
       BRONZE_PATH: /data/delta/bronze
-      SILVER_PATH: /data/delta/silver_cars
-      CHECKPOINT_PATH: /data/checkpoints/silver_cars
+      BRONZE_CHECKPOINT_PATH: /data/checkpoints/bronze
+      SILVER1_PATH: /data/delta/silver1
+      SILVER1_CHECKPOINT_PATH: /data/checkpoints/silver1
     depends_on:
-      bronze-job:
-        condition: service_started
+      kafka:
+        condition: service_healthy
 
-  # --- Gold -------------------------------------------------------
-  # Silver -> business-ready fields. A plain SELECT for now; the future
-  # two-table join lands here (see gold_job.py).
-  gold-job:
+  # --- Silver 2 + Gold ----------------------------------------------
+  # One Spark driver, two streaming queries:
+  #   Silver 1 -> standardized via canonical lookups & parsing chains (silver2)
+  #   Silver 2 -> business-ready fields via GOLD_TRANSFORM_SQL (gold)
+  silver2-gold-job:
     build: ./spark-jobs
-    container_name: gold-job
-    command: [ "python", "gold_job.py" ]
+    container_name: silver2-gold-job
+    command: [ "python", "run_layers.py", "silver2", "gold" ]
+    restart: on-failure
     volumes:
+      - ./spark-jobs:/app
       - ./delta:/data/delta
       - ./checkpoints:/data/checkpoints
+      - ivy-cache:/root/.ivy2
     environment:
-      SILVER_PATH: /data/delta/silver_cars
-      GOLD_PATH: /data/delta/gold_car_overview
-      CHECKPOINT_PATH: /data/checkpoints/gold_car_overview
+      SILVER1_PATH: /data/delta/silver1
+      SILVER2_PATH: /data/delta/silver2
+      SILVER2_CHECKPOINT_PATH: /data/checkpoints/silver2
+      QUARANTINE_PATH: /data/delta/silver2_quarantine
+      DEAD_LETTER_PATH: /data/delta/silver2_dead_letter
+      REF_MAPPINGS_PATH: /data/delta/ref_canonical_mappings
+      FUZZY_AUDIT_PATH: /data/delta/silver2_fuzzy_audit
+      GOLD_PATH: /data/delta/gold
+      GOLD_CHECKPOINT_PATH: /data/checkpoints/gold
+      OPENLINEAGE_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OPENLINEAGE_TOPIC: openlineage.events
     depends_on:
-      silver-job:
+      bronze-silver1-job:
         condition: service_started
+      kafka:
+        condition: service_healthy
+
+  # --- Knowledge graph -----------------------------------------------
+  # Lineage metadata (OpenLineage) and the incident corpus (vector index).
+  # Browser: http://localhost:7474   Bolt: bolt://localhost:7687
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: neo4j
+    ports:
+      - "7474:7474" # HTTP browser
+      - "7687:7687" # Bolt
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-selfhealing}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: [ "CMD-SHELL", "cypher-shell -u neo4j -p '${NEO4J_PASSWORD:-selfhealing}' 'RETURN 1' || exit 1" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # One-shot: applies lineage/schema.cypher (idempotent) and exits.
+  neo4j-init:
+    image: neo4j:5.26-community
+    container_name: neo4j-init
+    restart: "no"
+    entrypoint: [ "sh", "-c", "cypher-shell -a bolt://neo4j:7687 -u neo4j -p '${NEO4J_PASSWORD:-selfhealing}' -f /schema/schema.cypher" ]
+    volumes:
+      - ./lineage/schema.cypher:/schema/schema.cypher:ro
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+  # Reads the OpenLineage events the Spark jobs publish to Kafka and writes the
+  # pipeline lineage graph (jobs, runs, tables, schema versions) into Neo4j.
+  lineage-consumer:
+    build: ./lineage
+    container_name: lineage-consumer
+    restart: on-failure
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OPENLINEAGE_TOPIC: openlineage.events
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-selfhealing}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      neo4j-init:
+        condition: service_completed_successfully
+
+volumes:
+  ivy-cache:
+  neo4j-data:
+  neo4j-logs:

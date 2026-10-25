@@ -1,24 +1,26 @@
-# Self-healing pipeline — Bronze/Silver/Gold starter
+# Self-healing pipeline — Bronze/Silver1/Silver2/Gold Lakehouse
 
-Kafka → three Spark Structured Streaming jobs (Bronze, Silver, Gold) → Delta
+Kafka → Spark Structured Streaming jobs (Bronze, Silver1, Silver2, Gold) → Delta
 Lake, running as a multi-hop pipeline: each layer streams from the previous
-layer's Delta table, the same pattern real Lakehouses use. Ships with a
-small bundled mock dataset so it runs immediately with no download step.
+layer's Delta table, following the Medallion Lakehouse pattern.
 
 ```
 producer --> kafka --> bronze-job --> delta/bronze
                                           |
                                           v
-                                     silver-job --> delta/silver_cars
-                                                        |
-                                                        v
-                                                   gold-job --> delta/gold_car_overview
+                                     silver1-job --> delta/silver1 (Format & Cleaning)
+                                                         |
+                                                         v
+                                                    silver2-job --> delta/silver2 (Standardization)
+                                                                        |
+                                                                        v
+                                                                    gold-job --> delta/gold (Analytics)
 ```
 
 ## Prerequisites
 
 - Docker + Docker Compose v2
-- ~6-8 GB RAM free (Kafka + three separate Spark JVMs, one per layer)
+- ~4 GB RAM free (Kafka + two Spark JVMs)
 
 ## Setup
 
@@ -26,60 +28,96 @@ producer --> kafka --> bronze-job --> delta/bronze
 docker compose up --build
 ```
 
-That's it — no dataset to download. The producer replays the bundled
-`data/mock_cars.csv` (15 rows, using the real dataset's exact column
-names) through Kafka into Bronze, Silver, and Gold automatically.
+The producer replays the partitioned datasets (`data/Crash1`, `data/Crash2`,
+`data/Crash3`) across their respective parts through Kafka topics (`crashes.crash1`,
+`crashes.crash2`, `crashes.crash3`) into Bronze automatically.
 
 First run takes a minute or two (Spark images install a JVM, connector
 jars get pulled). Subsequent runs are fast.
 
 ## Watch it work
 
-- **Kafka UI** — http://localhost:8080 — browse the `cars.raw` topic
-- **Producer logs** — `Batch N: published 5 rows to 'cars.raw'` every 5s
-- **bronze-job / silver-job / gold-job logs** — each prints its source and
-  destination path once, then streams silently as micro-batches arrive
+- **Kafka UI** — http://localhost:8080 — browse `crashes.crash1`, `crashes.crash2`, `crashes.crash3`
+- **Producer logs** — `[Crash1] Batch N: published 50 rows to 'crashes.crash1'`
+- **bronze-silver1-job logs** — one Spark driver running two queries:
+  - `[bronze]` prints subscribed topics and streams micro-batches into `delta/bronze`
+  - `[silver1]` unpacks JSON into 49 fields and runs formatting/cleaning SQL -> `delta/silver1`
+- **silver2-gold-job logs** — one Spark driver running two queries:
+  - `[silver2]` streams from Silver 1 and applies standardization SQL -> `delta/silver2`
+  - `[gold]` streams from Silver 2 into business-ready table -> `delta/gold`
+- **lineage-consumer logs** — `[lineage] write_gold COMPLETED (n of m events written)`
+- **Neo4j browser** — http://localhost:7474 (user `neo4j`, password `NEO4J_PASSWORD`, default
+  `selfhealing`) — try `MATCH p=(:Table)-[:FEEDS*]->(:Table) RETURN p`
 
 ## Verify data landed, from the host (no Spark needed)
 
 ```bash
 pip install deltalake pandas
 python verify_delta.py bronze
-python verify_delta.py silver_cars
-python verify_delta.py gold_car_overview
+python verify_delta.py silver1
+python verify_delta.py silver2
+python verify_delta.py silver2_quarantine
+python verify_delta.py ref_mappings
+python verify_delta.py gold
 ```
-
-`silver_cars` should show parsed numeric fields (`horsepower_hp`,
-`price_usd`, `powertrain_type`, ...) instead of raw strings — including one
-row (Ford F-150) with `price_usd = NULL`, since its source value was the
-deliberately-messy `"unknown"`, proving the transform nulls out cleanly
-instead of crashing the batch.
 
 To stop: `docker compose down`. To wipe all state and start clean:
 `docker compose down && rm -rf delta checkpoints`.
 
 ## What's in each piece
 
-- **`producer/`** — reads a CSV (schema-agnostic), publishes rows to Kafka
-  in small batches on an interval, wrapped in an envelope
-  (`record_id`, `batch_id`, `ingestion_ts`, `payload`). Unchanged from
-  before -- doesn't know or care what columns exist.
+- **`producer/`** — reads partitioned CSVs, publishes rows to Kafka
+  in batches on an interval, wrapped in an envelope
+  (`record_id`, `batch_id`, `table_name`, `ingestion_ts`, `payload`, `**row`).
 - **`spark-jobs/common.py`** — shared Spark session builder and a
-  wait-for-upstream-table guard, used by all three jobs below.
-- **`spark-jobs/bronze_job.py`** — Kafka → Delta, untouched. Raw string
-  values plus Kafka's own metadata. No parsing.
-- **`spark-jobs/silver_job.py`** — the file to edit. `PAYLOAD_SCHEMA` at
-  the top defines what the JSON payload looks like (matches the mock
-  CSV's header exactly); `SILVER_TRANSFORM_SQL` is one plain SQL string
-  that does the actual cleaning, run via `spark.sql(...)`.
-- **`spark-jobs/gold_job.py`** — also editable SQL (`GOLD_TRANSFORM_SQL`).
-  Currently a plain `SELECT` from Silver; the comment marks exactly where
-  a join against a second Silver table goes later.
-- **`delta/{bronze,silver_cars,gold_car_overview}`** — the three tables.
+  wait-for-upstream-table guard, used by all jobs.
+- **`spark-jobs/run_layers.py`** — runs several layers as streaming queries in
+  one Spark driver (`python run_layers.py bronze silver1`). Compose uses it to
+  run the four layers in two containers instead of four JVMs. Each
+  `<layer>_job.py` exposes `start(spark)` and still runs on its own too.
+- **`spark-jobs/bronze_job.py`** — Kafka → Delta, untouched raw landing. Raw string
+  values plus Kafka's own metadata.
+- **`spark-jobs/silver1_job.py`** — Bronze → Silver 1. Unpacks JSON envelope and
+  provides `SILVER1_TRANSFORM_SQL` for formatting and cleaning.
+- **`spark-jobs/silver2_job.py`** — Silver 1 → Silver 2. Provides
+  `SILVER2_TRANSFORM_SQL` for data standardization.
+- **`spark-jobs/gold_job.py`** — Silver 2 → Gold. Provides
+  `GOLD_TRANSFORM_SQL` for business-ready fields and metrics.
+- **`lineage/`** — pipeline lineage in Neo4j. See [Lineage](#lineage) below.
+- **`delta/{bronze,silver1,silver2,gold}`** — the four Lakehouse tables.
   Inspect with `verify_delta.py`.
 - **`checkpoints/`** — Structured Streaming's checkpoint state per job.
-  Don't hand-edit; delete the relevant subfolder for a clean restart of
-  just that layer.
+
+## Lineage
+
+Every Spark job carries the `openlineage-spark` listener (wired in
+`spark-jobs/common.py`). It publishes OpenLineage events to the Kafka topic
+`openlineage.events`; `lineage-consumer` reads them and writes the graph into Neo4j
+(spec KG1):
+
+```
+Spark jobs --OpenLineage events--> kafka: openlineage.events --> lineage-consumer --> Neo4j
+```
+
+- `lineage/normalize.py` keeps only the events that write a pipeline table and maps
+  paths to table names (`/data/delta/silver2` becomes `silver2`). The raw stream is
+  mostly Spark-internal plans and `_delta_log` reads, which carry no lineage.
+- `lineage/graph.py` merges `(:Job)`, `(:Run)`, `(:Table)`, `(:SchemaVersion)` and
+  `(:Table)-[:FEEDS]->(:Table)` into Neo4j. Every statement is a `MERGE`, so a replayed
+  event changes nothing. The `:Table` nodes are the ones incidents attach to.
+- `graph.downstream_tables()` / `upstream_tables()` answer "what does a failure in
+  `silver2` reach" for the Deterministic Lookup step.
+
+The listener must be **openlineage-spark 1.53.0 or newer** (pinned to 1.54.0). Earlier
+versions do not report the Gold write, so the `silver2 -> gold` edge is missing.
+
+Set `OPENLINEAGE_ENABLED=false` on a Spark service to turn the listener off.
+
+Neo4j only applies `lineage/schema.cypher` when `neo4j-init` runs. If your Neo4j
+container already exists, apply the new constraints once with
+`docker compose up neo4j-init`.
+
+Unit tests (no Kafka or Neo4j needed): `cd lineage && python -m pytest tests`.
 
 ## Swapping in the real dataset later
 
@@ -99,8 +137,6 @@ To stop: `docker compose down`. To wipe all state and start clean:
   simulated source, deliberately rename/drop a field mid-stream.
 - **Fault injection harness** — a corruption step between the CSV and the
   producer.
-- **Lineage capture** — `openlineage-spark` as a Spark listener, pointed
-  at a webhook that writes into Neo4j.
 - **Detect/triage layer** — Great Expectations checkpoints on `silver_cars`,
   plus the severity-classification logic from the architecture doc.
 
@@ -109,7 +145,7 @@ To stop: `docker compose down`. To wipe all state and start clean:
 - Kafka runs in KRaft mode (no ZooKeeper) via the official `apache/kafka`
   image.
 - `pyspark==3.5.3` / `delta-spark==3.3.1` is a verified-compatible pairing.
-- Each Spark job's `depends_on: condition: service_started` only ensures
+- Each Spark service's `depends_on: condition: service_started` only ensures
   container start order for readable logs -- the real safety comes from
   `wait_for_delta_table()` in `common.py`, which polls until the upstream
   table actually exists before starting a stream read on it.
