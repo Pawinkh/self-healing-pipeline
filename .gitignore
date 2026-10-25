@@ -110,3 +110,6 @@ $RECYCLE.BIN/
 # Ignore active session files anywhere in the repo
 **/.active_id
 **/.active_layer
+
+# Local Qwen triage records
+/incidents/

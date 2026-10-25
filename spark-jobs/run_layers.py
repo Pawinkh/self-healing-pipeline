@@ -54,4 +54,5 @@ def main(layers):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    from qwen_classifier.integration import run_job
+    run_job(lambda: main(sys.argv[1:]), job_name="Pipeline-" + "-".join(sys.argv[1:]))

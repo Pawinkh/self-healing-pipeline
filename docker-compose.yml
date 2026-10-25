@@ -73,10 +73,16 @@ services:
     restart: on-failure
     volumes:
       - ./spark-jobs:/app
+      - ./qwen_classifier:/app/qwen_classifier:ro
+      - ./incidents:/data/incidents
       - ./delta:/data/delta
       - ./checkpoints:/data/checkpoints
       - ivy-cache:/root/.ivy2
     environment:
+      QWEN_ENABLED: ${QWEN_ENABLED:-false}
+      QWEN_BASE_URL: ${QWEN_BASE_URL:-http://host.docker.internal:11434}
+      QWEN_MODEL: ${QWEN_MODEL:-qwen3:4b-instruct}
+      QWEN_INCIDENT_DIR: /data/incidents
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPICS: crashes.crash1,crashes.crash2,crashes.crash3
       OPENLINEAGE_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
@@ -100,10 +106,16 @@ services:
     restart: on-failure
     volumes:
       - ./spark-jobs:/app
+      - ./qwen_classifier:/app/qwen_classifier:ro
+      - ./incidents:/data/incidents
       - ./delta:/data/delta
       - ./checkpoints:/data/checkpoints
       - ivy-cache:/root/.ivy2
     environment:
+      QWEN_ENABLED: ${QWEN_ENABLED:-false}
+      QWEN_BASE_URL: ${QWEN_BASE_URL:-http://host.docker.internal:11434}
+      QWEN_MODEL: ${QWEN_MODEL:-qwen3:4b-instruct}
+      QWEN_INCIDENT_DIR: /data/incidents
       SILVER1_PATH: /data/delta/silver1
       SILVER2_PATH: /data/delta/silver2
       SILVER2_CHECKPOINT_PATH: /data/checkpoints/silver2
