@@ -106,3 +106,7 @@ ehthumbs.db
 ehthumbs_vista.db
 [Dd]esktop.ini
 $RECYCLE.BIN/
+
+# Ignore active session files anywhere in the repo
+**/.active_id
+**/.active_layer

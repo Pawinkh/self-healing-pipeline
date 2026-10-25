@@ -6,14 +6,17 @@ import duckdb
 # Mapping of folder names for your pipeline layers
 LAYERS = {
     "bronze": "./delta/bronze/part-*.parquet",
-    "silver": "./delta/silver_cars/part-*.parquet",
+    "silver1": "./delta/silver1/part-*.parquet",
+    "silver2": "./delta/silver2/part-*.parquet",
+    "gold": "./delta/gold/part-*.parquet",
+    # Legacy aliases
+    "silver": "./delta/silver1/part-*.parquet",
     "silver_cars": "./delta/silver_cars/part-*.parquet",
-    "gold": "./delta/gold_car_overview/part-*.parquet",
     "gold_car_overview": "./delta/gold_car_overview/part-*.parquet",
 }
 
 def main():
-    arg = sys.argv[1] if len(sys.argv) > 1 else "gold_car_overview"
+    arg = sys.argv[1] if len(sys.argv) > 1 else "gold"
 
     # Check if the user passed a direct path to a file (e.g. delta/gold_car_overview/part-....parquet)
     if os.path.exists(arg) or arg.endswith(".parquet"):

@@ -9,24 +9,29 @@ somewhere.
 """
 
 import os
+from typing import Optional
 
+from pyspark.sql import SparkSession
 from pyspark.sql.functions import current_timestamp
+from pyspark.sql.streaming import StreamingQuery
 
 from common import build_spark
 
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "cars.raw")
-DELTA_TABLE_PATH = os.environ.get("DELTA_TABLE_PATH", "/data/delta/bronze")
-CHECKPOINT_PATH = os.environ.get("CHECKPOINT_PATH", "/data/checkpoints/bronze")
+KAFKA_TOPICS = os.environ.get(
+    "KAFKA_TOPICS",
+    os.environ.get("KAFKA_TOPIC", "crashes.crash1,crashes.crash2,crashes.crash3"),
+)
+BRONZE_PATH = os.environ.get("BRONZE_PATH", "/data/delta/bronze")
+CHECKPOINT_PATH = os.environ.get("BRONZE_CHECKPOINT_PATH", "/data/checkpoints/bronze")
 
 
-def main():
-    spark = build_spark("BronzeLanding")
-
+def start(spark: SparkSession, upstream: Optional[StreamingQuery] = None) -> StreamingQuery:
+    """Start the Bronze query on `spark`. Bronze reads Kafka, so `upstream` is unused."""
     raw_stream = (
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
-        .option("subscribe", KAFKA_TOPIC)
+        .option("subscribe", KAFKA_TOPICS)
         .option("startingOffsets", "earliest")
         .option("failOnDataLoss", "false")
         .load()
@@ -43,13 +48,19 @@ def main():
 
     query = (
         landed.writeStream.format("delta")
+        .queryName("bronze")
+        .trigger(processingTime="10 seconds") #Stop RAM from exploding
         .option("checkpointLocation", CHECKPOINT_PATH)
         .outputMode("append")
-        .start(DELTA_TABLE_PATH)
+        .start(BRONZE_PATH)
     )
 
-    print(f"[bronze] Streaming '{KAFKA_TOPIC}' -> {DELTA_TABLE_PATH}")
-    query.awaitTermination()
+    print(f"[bronze] Streaming '{KAFKA_TOPICS}' -> {BRONZE_PATH}")
+    return query
+
+
+def main():
+    start(build_spark("BronzeLanding")).awaitTermination()
 
 
 if __name__ == "__main__":
